@@ -571,6 +571,7 @@ MIT License — free to use, modify, and build upon.
 - Flask + Waitress bridge server
 - Rich terminal UI
 - OpenWebUI for ChatGPT-style interface
+- OpenSwarm
 
 **A note on how the LM Studio integration was built:**
 
