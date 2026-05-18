@@ -2,7 +2,7 @@
   <img src="docs/banner.png" alt="AI Local Swarm — 100% Local, Private, Powerful" width="600"/>
 </p>
 
-# 🏛️ AI Local Executive Team
+# 🏛️ AI Local Executive Team - AI LOCAL SWARM
 
 **A fully local multi-agent AI board — five specialized models collaborating like a real executive team.**
 
