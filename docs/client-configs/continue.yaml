@@ -1,0 +1,117 @@
+# Continue Extension Config — AI Executive Team Bridge
+# ~/.continue/config.yaml
+#
+# HOW TO INSTALL:
+#   1. Install Continue extension in VS Code
+#   2. Press Ctrl+Shift+P → "Continue: Open config.yaml"
+#   3. Replace the contents with this file
+#   4. Make sure the bridge is running (start.bat)
+#   5. Reload VS Code
+#
+# All models route through the bridge at localhost:5555
+# The bridge handles routing to the right executive automatically.
+
+models:
+  # ── EXECUTIVE SWARM (Full Board) ──────────────────
+  - name: Executive Swarm
+    provider: openai
+    model: executive-swarm
+    apiBase: http://localhost:5555/v1
+    apiKey: local
+    description: "Full board meeting — CEO+CTO+CFO+CPO+COO in parallel"
+
+  # ── INDIVIDUAL EXECUTIVES ─────────────────────────
+  - name: CEO
+    provider: openai
+    model: ceo
+    apiBase: http://localhost:5555/v1
+    apiKey: local
+    description: "Strategic direction and final decisions"
+
+  - name: CTO
+    provider: openai
+    model: cto
+    apiBase: http://localhost:5555/v1
+    apiKey: local
+    description: "Technical analysis and code writing"
+
+  - name: CFO
+    provider: openai
+    model: cfo
+    apiBase: http://localhost:5555/v1
+    apiKey: local
+    description: "Financial and risk analysis"
+
+  - name: CPO
+    provider: openai
+    model: cpo
+    apiBase: http://localhost:5555/v1
+    apiKey: local
+    description: "Product strategy and UX"
+
+  - name: COO
+    provider: openai
+    model: coo
+    apiBase: http://localhost:5555/v1
+    apiKey: local
+    description: "Task planning and execution (fastest)"
+
+  # ── AUTOCOMPLETE ──────────────────────────────────
+tabAutocompleteModel:
+  name: Autocomplete
+  provider: openai
+  model: autocomplete
+  apiBase: http://localhost:5555/v1
+  apiKey: local
+
+# ── REQUEST TIMEOUTS ──────────────────────────────────
+# Increase these if executives time out on complex questions
+requestOptions:
+  timeout: 600        # 10 min hard timeout (full board needs this)
+  verifySsl: false
+
+# ── CUSTOM COMMANDS ───────────────────────────────────
+# Use these as slash commands in Continue chat: /board, /debug, etc.
+slashCommands:
+  - name: board
+    description: "Full executive board meeting — deep analysis"
+    prompt: |
+      Call a full board meeting on this topic. I want analysis from:
+      - CEO: strategic implications and final recommendation
+      - CTO: technical feasibility and implementation approach
+      - CFO: cost, risk and financial impact
+      - CPO: user/product impact and feature considerations
+      - COO: concrete next steps and execution plan
+      Be thorough. The topic is: {{{ input }}}
+
+  - name: debug
+    description: "CTO deep-dives a bug or error"
+    prompt: |
+      As the CTO, analyze this error in full detail:
+      1. Root cause (what exactly failed and why)
+      2. Immediate fix with code
+      3. Any related issues to watch for
+      4. How to prevent this in the future
+      Error/code: {{{ input }}}
+
+  - name: review
+    description: "Board reviews a technical decision"
+    prompt: |
+      I need the executive team to weigh in on this technical decision.
+      Please give each executive's perspective:
+      - CTO: technical merits and risks
+      - CFO: cost and ROI
+      - CPO: product and user impact
+      - COO: execution complexity
+      - CEO: final recommendation
+      Decision: {{{ input }}}
+
+  - name: plan
+    description: "COO breaks down a task into a sprint plan"
+    prompt: |
+      As the COO, create a detailed execution plan for this:
+      - Break it into specific tasks with time estimates
+      - Identify dependencies between tasks
+      - Flag any risks or blockers
+      - Suggest the order of execution
+      Task: {{{ input }}}

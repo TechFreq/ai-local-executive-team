@@ -1,0 +1,30 @@
+AnythingLLM Setup — AI Executive Team Bridge
+=============================================
+
+STEP 1 — Open LLM Provider Settings
+  AnythingLLM → Settings → LLM Preference
+
+STEP 2 — Select provider
+  Provider: Generic OpenAI
+
+STEP 3 — Enter bridge URL
+  Base URL:  http://localhost:5555/v1
+  API Key:   local  (any value works)
+  Model:     executive-swarm
+
+STEP 4 — Save and test
+  Click "Update" then send a test message.
+
+AVAILABLE MODELS
+  executive-swarm   Full board meeting (default)
+  ceo               CEO only
+  cto               CTO only
+  cfo               CFO only
+  cpo               CPO only
+  coo               COO only (fastest)
+
+NOTE
+  AnythingLLM is best used with the 'coo' or 'cto' model
+  for document Q&A — full board meetings are slow when
+  asking questions about uploaded documents.
+  Use executive-swarm only for strategic questions.

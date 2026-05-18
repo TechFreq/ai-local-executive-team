@@ -1,0 +1,30 @@
+{
+  "//": "Cline / Kilo Code VS Code Extension Config",
+  "//applies_to": "Works for both Cline and Kilo Code extensions — same settings",
+  "//setup": [
+    "1. Install Cline or Kilo Code extension in VS Code",
+    "2. Open extension settings (gear icon in sidebar)",
+    "3. Set API Provider to: OpenAI Compatible",
+    "4. Set Base URL to: http://localhost:5555/v1",
+    "5. Set API Key to: local (any value works)",
+    "6. Set Model to: executive-swarm",
+    "7. Make sure the bridge is running (start.bat)"
+  ],
+
+  "provider": "openai-compatible",
+  "baseUrl": "http://localhost:5555/v1",
+  "apiKey": "local",
+  "model": "executive-swarm",
+
+  "//models": {
+    "executive-swarm": "Full board meeting — routes to all 5 executives",
+    "ceo": "CEO only — strategy and decisions",
+    "cto": "CTO only — code and architecture (fastest for coding tasks)",
+    "cfo": "CFO only — cost and risk analysis",
+    "cpo": "CPO only — product and UX",
+    "coo": "COO only — task planning and execution",
+    "autocomplete": "2B model — code autocomplete"
+  },
+
+  "//tip": "For coding tasks, select 'cto' model directly — faster than full board"
+}

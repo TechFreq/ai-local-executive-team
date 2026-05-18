@@ -1,0 +1,59 @@
+# config.yaml.example
+# ══════════════════════════════════════════════════════
+# Copy this file to config.yaml before running the bridge.
+#
+#   Windows:  copy config.yaml.example config.yaml
+#   Linux:    cp config.yaml.example config.yaml
+#
+# Or just run install.bat — it generates config.yaml
+# automatically with these defaults.
+# ══════════════════════════════════════════════════════
+
+# Active preset — which model lineup to use.
+# Options: fastest | fast | balanced | smart | nuclear | gemma12b
+# Change this here OR press SPACE while the bridge is running.
+active_preset: gemma12b
+
+last_switched: '2026-01-01T00:00:00'
+presets_dir: ./presets
+auto_timeout_seconds: 10
+
+server:
+  bridge_port: 5555          # Port the bridge listens on
+  bridge_host: localhost
+  lm_studio_url: http://localhost:1234/v1   # LM Studio default
+  ollama_url: http://localhost:11434/v1     # Ollama default (optional)
+  backend: lmstudio          # lmstudio | ollama
+  use_cloud: false           # Set true to enable OpenRouter fallback
+
+# Optional cloud fallback via OpenRouter (use_cloud must be true)
+# cloud:
+#   openrouter_api_key: sk-or-...
+#   openrouter_base_url: https://openrouter.ai/api/v1
+
+timeouts:
+  first_token_secs: 120      # Wait this long for the first token before fallback
+  hard_timeout_secs: 600     # Absolute max per request
+  keepalive_interval: 5      # Seconds between keepalive signals to client
+  load_timeout_secs: 480     # Max time to wait for a model to load
+
+# Per-executive generation settings
+# Lower temperature = more focused/deterministic
+# Higher temperature = more creative
+generation:
+  ceo_temperature: 0.7       # Strategic — balanced
+  cto_temperature: 0.4       # Technical — precise
+  cfo_temperature: 0.3       # Financial — analytical, low variance
+  cpo_temperature: 0.8       # Product — more creative
+  coo_temperature: 0.5       # Operations — structured
+  ceo_max_tokens: 2000
+  cto_max_tokens: 2000
+  cfo_max_tokens: 1500
+  cpo_max_tokens: 1500
+  coo_max_tokens: 2000
+  default_max_tokens: 2000
+
+logging:
+  track_performance: true    # Set false to disable model_performance.json
+  performance_file: model_performance.json
+  log_level: info

@@ -1,0 +1,45 @@
+# ══════════════════════════════════════════════════════
+# GEMMA 3 12B MODE — The Original Classic
+# Built specifically for RTX 3060 12GB + 64GB RAM
+# ══════════════════════════════════════════════════════
+name: "GEMMA312B"
+description: |
+  The OG mode where this whole Executive Team started.
+  One powerful model playing all 5 roles via system prompts.
+  Most stable and reliable mode.
+
+board:
+  ceo: google/gemma-3-12b
+  cto: google/gemma-3-12b
+  cfo: google/gemma-3-12b
+  cpo: google/gemma-3-12b
+  coo: google/gemma-3-12b
+
+utility:
+  autocomplete: google/gemma-4-e2b
+  vision: qwen/qwen2.5-vl-7b-instruct
+  embed: nomic-ai/nomic-embed-text-v1.5
+
+fallback:
+  primary: google/gemma-3-12b
+  general: google/gemma-3-12b
+  fast_reasoning: google/gemma-3-12b
+  last_resort: google/gemma-4-e2b
+
+display:
+  vram: "~8.2GB GPU only — perfect for 12GB"
+  meeting_time: "3-6 min"
+  quality: "★★★★☆"
+
+# ── HOW IT WORKS ──────────────────────────────────────
+# All 5 agents use the SAME model but different system prompts.
+# This creates distinct personalities:
+#   CEO → decisive, strategic
+#   CTO → technical, detailed
+#   CFO → analytical, numbers
+#   CPO → user-focused, creative
+#   COO → structured, execution-oriented
+#
+# VRAM: ~8.2GB — loads once, stays loaded for all 5 agents.
+# Speed: ~25-35 tok/s  |  Board meeting: 3-6 min
+# Stability: ★★★★★  — Recommended for daily use

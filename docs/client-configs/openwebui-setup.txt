@@ -1,0 +1,52 @@
+OpenWebUI Setup — AI Executive Team Bridge
+==========================================
+
+REQUIREMENTS
+  - Docker Desktop installed and running
+  - Bridge running at localhost:5555 (start.bat)
+
+STEP 1 — Start OpenWebUI
+  Run: restart_openwebui.bat  (in project root)
+  Or manually:
+    docker run -d --name open-webui --restart always \
+      -p 3000:8080 \
+      -v open-webui:/app/backend/data \
+      --add-host=host.docker.internal:host-gateway \
+      ghcr.io/open-webui/open-webui:main
+
+STEP 2 — Add the bridge as an Ollama connection
+  1. Open http://localhost:3000
+  2. Log in (create account on first run)
+  3. Click your profile icon → Settings → Connections
+  4. Under "Ollama" section, change URL to:
+       http://host.docker.internal:5555
+     (NOT localhost — Docker needs the host gateway)
+  5. Click Save
+
+STEP 3 — Select a model
+  1. Start a new chat
+  2. Click the model dropdown at the top
+  3. Pick "Executive Swarm" for full board meetings
+     Or pick CEO / CTO / CFO / CPO / COO directly
+
+STEP 4 — Verify
+  You should see all 6+ models in the picker.
+  Send a message — you'll see the executives respond
+  in the bridge terminal window.
+
+TROUBLESHOOTING
+  - Models not appearing: Check bridge is running, refresh page
+  - Connection refused: Make sure you used host.docker.internal, not localhost
+  - OpenWebUI not loading: Check Docker is running (docker ps)
+  - Slow responses: Normal — local models take time. Use FASTEST preset for quick answers.
+
+STOP / RESTART
+  Stop:    stop_openwebui.bat  (in project root)
+  Restart: restart_openwebui.bat
+
+MANAGING OPENWEBUI
+  docker ps                    — check if running
+  docker logs open-webui       — view logs
+  docker stop open-webui       — stop
+  docker start open-webui      — start again (keeps settings)
+  docker rm open-webui         — remove (loses settings)

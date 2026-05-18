@@ -1,0 +1,30 @@
+# ══════════════════════════════════════════════════════════
+# FASTEST MODE — Tiny models only, instant responses
+# ══════════════════════════════════════════════════════════
+name: "Fastest"
+description: |
+  Tiny GPU-only models. Instant responses.
+  Best for quick questions and autocomplete.
+
+board:
+  ceo: google/gemma-4-e2b
+  cto: deepseek/deepseek-r1-0528-qwen3-8b
+  cfo: deepseek/deepseek-r1-0528-qwen3-8b
+  cpo: google/gemma-4-e2b
+  coo: qwen/qwen3.5-9b
+
+utility:
+  autocomplete: google/gemma-4-e2b
+  embed: nomic-ai/nomic-embed-text-v1.5
+  vision: qwen/qwen2.5-vl-7b-instruct
+
+fallback:
+  primary: google/gemma-3-12b
+  general: qwen/qwen3.5-9b
+  fast_reasoning: deepseek/deepseek-r1-0528-qwen3-8b
+  last_resort: google/gemma-3-12b
+
+display:
+  vram: "~5-6GB GPU only"
+  meeting_time: "30s-1min"
+  quality: "★★☆☆☆"

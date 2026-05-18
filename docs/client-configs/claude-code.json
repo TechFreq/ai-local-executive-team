@@ -1,0 +1,23 @@
+{
+  "//": "Claude Code Settings — routes Claude through the AI Executive Team bridge",
+  "//setup": "Copy these settings into your Claude Code settings.json",
+  "//location": "Windows: %APPDATA%\\Claude\\claude_code\\settings.json",
+  "//note": "The bridge translates Claude API calls to local LLM calls",
+
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:5555",
+    "ANTHROPIC_API_KEY": "local-no-key-needed"
+  },
+
+  "//model": "Claude Code will use the bridge — actual model is set by your active preset",
+  "//tip": "The bridge's executive-swarm model appears as the Claude model to Claude Code",
+
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)"
+    ]
+  }
+}

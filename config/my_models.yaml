@@ -1,0 +1,76 @@
+# config/my_models.yaml
+# ══════════════════════════════════════════════════════
+# MY MODEL OVERRIDES
+# Change a model in ONE place — affects ALL presets
+# ══════════════════════════════════════════════════════
+#
+# HOW TO USE:
+#   1. Find the role you want to change below
+#   2. Remove the # at the start of that line
+#   3. Replace the model ID with the one you downloaded
+#   4. Save this file
+#   5. Restart the bridge (or press SPACE → same preset)
+#
+# Model IDs must match exactly what LM Studio shows.
+# Example: google/gemma-4-31b   or   qwen/qwen3-coder-30b
+# Tip: In LM Studio → My Models → hover a model to see its ID
+#
+# This file overrides ALL presets (balanced, fast, smart, etc.)
+# Comment out a line to stop overriding that role.
+# Delete this file entirely to restore default preset behavior.
+#
+# ── BOARD OVERRIDES ───────────────────────────────────
+
+board:
+  # ceo: google/gemma-4-31b
+  # cto: qwen/qwen3-coder-30b
+  # cfo: deepseek/deepseek-r1-distill-qwen-32b
+  # cpo: google/gemma-4-26b-a4b
+  # coo: qwen/qwen2.5-coder-14b-instruct
+
+# ── UTILITY OVERRIDES ─────────────────────────────────
+
+utility:
+  # autocomplete: google/gemma-4-e2b
+  # vision: qwen/qwen2.5-vl-7b-instruct
+  # embed: nomic-ai/nomic-embed-text-v1.5
+
+# ── FALLBACK OVERRIDES ────────────────────────────────
+
+fallback:
+  # primary: microsoft/phi-4-reasoning-plus
+  # general: qwen/qwen3.5-9b
+  # fast_reasoning: deepseek/deepseek-r1-0528-qwen3-8b
+  # last_resort: google/gemma-3-12b
+
+# ══════════════════════════════════════════════════════
+# EXAMPLES
+# ══════════════════════════════════════════════════════
+#
+# — Swap CEO to a model you downloaded:
+#
+#   board:
+#     ceo: meta-llama/llama-3.1-70b-instruct
+#
+# — Use one model for ALL roles (like the gemma12b preset):
+#
+#   board:
+#     ceo: google/gemma-3-12b
+#     cto: google/gemma-3-12b
+#     cfo: google/gemma-3-12b
+#     cpo: google/gemma-3-12b
+#     coo: google/gemma-3-12b
+#
+# — Speed up the whole board by swapping heavy models for smaller ones:
+#
+#   board:
+#     ceo: qwen/qwen3.5-9b
+#     cfo: microsoft/phi-4-reasoning-plus
+#     cpo: qwen/qwen3.5-9b
+#
+# — Only change the COO to something faster (leave others alone):
+#
+#   board:
+#     coo: google/gemma-4-e2b
+#
+# ══════════════════════════════════════════════════════

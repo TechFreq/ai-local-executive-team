@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════
+# FAST MODE — All full-GPU models, maximum speed
+# Built specifically for RTX 3060 12GB + 64GB RAM
+# ══════════════════════════════════════════════════════
+name: "Fast"
+description: |
+  Everything runs fully on GPU. Blazing fast responses.
+  Perfect for quick questions and daily coding.
+
+board:
+  ceo: google/gemma-3-12b
+  cto: qwen/qwen3.5-9b
+  cfo: microsoft/phi-4-reasoning-plus
+  cpo: google/gemma-4-e4b
+  coo: google/gemma-4-e2b
+
+utility:
+  autocomplete: google/gemma-4-e2b
+  vision: qwen/qwen2.5-vl-7b-instruct
+  embed: nomic-ai/nomic-embed-text-v1.5
+
+fallback:
+  primary: google/gemma-4-e2b
+  general: google/gemma-3-12b
+  fast_reasoning: microsoft/phi-4-reasoning-plus
+  last_resort: google/gemma-4-e2b
+
+display:
+  vram: "~8-9GB GPU only"
+  meeting_time: "2-4 min"
+  quality: "★★★☆☆"
+
+# ── VRAM USAGE ────────────────────────────────────────
+# CEO  gemma-3-12b             8.2GB  ✅ full GPU (~25-35 tok/s)
+# CTO  qwen3.5-9b              6.5GB  ✅ full GPU (~40-55 tok/s)
+# CFO  phi-4-reasoning-plus    9.1GB  ✅ full GPU (~35-45 tok/s)
+# CPO  gemma-4-e4b             6.3GB  ✅ full GPU (~50-70 tok/s)
+# COO  gemma-4-e2b             4.2GB  ✅ full GPU (~80+ tok/s)
+# AUTO gemma-4-e2b             4.4GB  ✅ full GPU
+#
+# All agents fit entirely in your 12GB VRAM (one at a time).
+# Response time: 10-30s per agent  |  Full board: 2-4 min

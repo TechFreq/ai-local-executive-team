@@ -1,0 +1,43 @@
+# ══════════════════════════════════════════════════════
+# NUCLEAR MODE — Maximum Intelligence
+# Built specifically for RTX 3060 12GB + 64GB RAM
+# ══════════════════════════════════════════════════════
+name: "Nuclear"
+description: |
+  Biggest and smartest models available locally.
+  Use when quality matters more than speed.
+
+board:
+  ceo: qwen/qwen3.6-35b-a3b
+  cto: qwen/qwen3-coder-30b
+  cfo: qwen/qwen3.6-35b-a3b
+  cpo: google/gemma-4-31b
+  coo: google/gemma-3-12b
+
+utility:
+  autocomplete: google/gemma-4-e2b
+  vision: qwen/qwen2.5-vl-7b-instruct
+  embed: nomic-ai/nomic-embed-text-v1.5
+
+fallback:
+  primary: google/gemma-3-12b
+  general: google/gemma-3-12b
+  fast_reasoning: deepseek/deepseek-r1-0528-qwen3-8b
+  last_resort: google/gemma-4-e2b
+
+display:
+  vram: "Heavy RAM offload — needs 64GB RAM"
+  meeting_time: "20-40 min"
+  quality: "★★★★★"
+
+# ── VRAM USAGE ────────────────────────────────────────
+# CEO  qwen3.6-35b-a3b         22.1GB  ❌ heavy RAM offload (~2-4 tok/s)
+# CTO  qwen3-coder-30b         18.6GB  ❌ heavy RAM offload (~4-7 tok/s)
+# CFO  qwen3.6-35b-a3b         22.1GB  ❌ heavy RAM offload (~2-4 tok/s)
+# CPO  gemma-4-31b             19.9GB  ❌ heavy RAM offload (~4-6 tok/s)
+# COO  gemma-3-12b              8.2GB  ✅ full GPU  (~25-35 tok/s)
+# AUTO gemma-4-e2b              4.4GB  ✅ full GPU
+#
+# MoE models (qwen3.6-35b) are smarter than their size suggests.
+# Your 64GB RAM handles this fine — quality beats speed here.
+# Use for architecture decisions, complex code reviews, important strategy.

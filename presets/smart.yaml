@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════
+# SMART MODE — Best quality with RAM offload
+# Built specifically for RTX 3060 12GB + 64GB RAM
+# ══════════════════════════════════════════════════════
+name: "Smart"
+description: |
+  Significantly better quality than Fast mode.
+  Uses bigger models with intelligent RAM offload.
+
+board:
+  ceo: google/gemma-4-31b
+  cto: qwen/qwen3-coder-30b
+  cfo: microsoft/phi-4-reasoning-plus
+  cpo: google/gemma-4-26b-a4b
+  coo: google/gemma-3-12b
+
+utility:
+  autocomplete: google/gemma-4-e2b
+  vision: qwen/qwen2.5-vl-7b-instruct
+  embed: nomic-ai/nomic-embed-text-v1.5
+
+fallback:
+  primary: microsoft/phi-4-reasoning-plus
+  general: google/gemma-3-12b
+  fast_reasoning: deepseek/deepseek-r1-0528-qwen3-8b
+  last_resort: google/gemma-3-12b
+
+display:
+  vram: "CEO/CTO/CPO hybrid, CFO/COO full GPU"
+  meeting_time: "8-15 min"
+  quality: "★★★★☆"
+
+# ── VRAM USAGE ────────────────────────────────────────
+# CEO  gemma-4-31b             19.9GB  ⚠️ RAM offload (~4-6 tok/s)
+# CTO  qwen3-coder-30b         18.6GB  ⚠️ RAM offload (~4-7 tok/s)
+# CFO  phi-4-reasoning-plus     9.1GB  ✅ full GPU   (~35-45 tok/s) + reasoning
+# CPO  gemma-4-26b-a4b         18.0GB  ⚠️ RAM offload (~4-7 tok/s)
+# COO  gemma-3-12b              8.2GB  ✅ full GPU   (~25-35 tok/s)
+# AUTO gemma-4-e2b              4.4GB  ✅ full GPU
+#
+# In LM Studio: Set GPU layers to partial (~10-11GB) for big models.
+# RAM handles the rest. Streaming still works live.

@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════
+# BALANCED MODE — Recommended Daily Driver
+# Built specifically for RTX 3060 12GB + 64GB RAM
+# ══════════════════════════════════════════════════════
+name: "Balanced"
+description: |
+  Best balance of quality and speed for your hardware.
+  Mix of full-GPU and hybrid models.
+
+board:
+  ceo: google/gemma-4-31b
+  cto: qwen/qwen3-coder-30b
+  cfo: deepseek/deepseek-r1-distill-qwen-32b
+  cpo: google/gemma-4-26b-a4b
+  coo: qwen/qwen2.5-coder-14b-instruct
+
+utility:
+  autocomplete: google/gemma-4-e2b
+  vision: qwen/qwen2.5-vl-7b-instruct
+  embed: nomic-ai/nomic-embed-text-v1.5
+
+fallback:
+  primary: microsoft/phi-4-reasoning-plus
+  general: qwen/qwen3.5-9b
+  fast_reasoning: deepseek/deepseek-r1-0528-qwen3-8b
+  last_resort: google/gemma-3-12b
+
+display:
+  vram: "CEO/CTO/CFO/CPO hybrid, COO full GPU"
+  meeting_time: "4-7 min"
+  quality: "★★★★☆"
+
+# ── VRAM USAGE ────────────────────────────────────────
+# CEO  gemma-4-31b             19.9GB  ⚠️ hybrid (~8-10 tok/s)
+# CTO  qwen3-coder-30b         18.6GB  ⚠️ hybrid (~8-10 tok/s)
+# CFO  deepseek-r1-32b         19.9GB  ⚠️ hybrid (~5-8 tok/s)
+# CPO  gemma-4-26b-a4b         18.0GB  ⚠️ hybrid (~8-10 tok/s)
+# COO  qwen2.5-coder-14b        9.0GB  ✅ full GPU (~35-45 tok/s)
+# AUTO gemma-4-e2b              4.4GB  ✅ full GPU
+#
+# For big models (CEO/CTO/CFO/CPO): set GPU layers to ~10-11GB in LM Studio.
+# DeepSeek R1 will show <think> blocks — this is normal reasoning.
