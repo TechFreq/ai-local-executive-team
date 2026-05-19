@@ -54,6 +54,20 @@ _raw           = cfg.lm_studio_url
 LM_STUDIO_BASE = _raw.rstrip("/").removesuffix("/v1")
 LOAD_TIMEOUT   = cfg.load_timeout_secs
 
+# ── Confirmed model ID map ────────────────────────────────────────
+# Models downloaded from non-lmstudio-community HF orgs (Donnyed,
+# unsloth, openfree, etc.) lose their publisher prefix in LM Studio's
+# API — it returns just the model name, not publisher/name.
+# These are confirmed mappings: our registry ID → LM Studio API ID.
+# Checked first in resolve_model_id before any dynamic lookup.
+CONFIRMED_ID_MAP: dict[str, str] = {
+    "qwen/qwen2.5-coder-14b-instruct":      "qwen2.5-coder-14b-instruct",
+    "qwen/qwq-32b":                          "qwq-32b",
+    "deepseek/deepseek-r1-distill-qwen-32b": "deepseek-r1-distill-qwen-32b",
+    "qwen/qwen2.5-vl-7b-instruct":           "qwen2.5-vl-7b-instruct",
+    "nomic-ai/nomic-embed-text-v1.5":        "text-embedding-nomic-embed-text-v1.5",
+}
+
 # ── instance_id cache — populated from load responses ─────────────
 # LM Studio requires instance_id to unload but doesn't expose it in
 # GET /api/v1/models.  We capture it from the POST /api/v1/models/load
@@ -672,24 +686,41 @@ def unload_any_loaded_model():
 # ══════════════════════════════════════════════════════════════════
 
 def get_lm_studio_model_ids() -> list[str]:
-    """GET /api/v1/models — all downloaded models."""
+    """
+    Returns all model IDs LM Studio knows about.
+    Queries both endpoints and merges — they return different ID formats
+    depending on where a model was downloaded from.
+    /api/v1/models = all downloaded (may have publisher prefix or not)
+    /v1/models     = currently loaded (reliable, OpenAI-compatible)
+    """
+    ids: set[str] = set()
+
     try:
-        r = requests.get(
-            f"{LM_STUDIO_BASE}/api/v1/models", timeout=5
-        )
+        r = requests.get(f"{LM_STUDIO_BASE}/api/v1/models", timeout=5)
         if r.status_code == 200:
             raw   = r.json()
             items = raw if isinstance(raw, list) else raw.get("data", [])
-            ids   = [
-                item.get("id") or item.get("model_id") or ""
-                for item in items
-                if item.get("id") or item.get("model_id")
-            ]
-            log_info(f"Available: {len(ids)} models", {"ids": ids})
-            return ids
+            for item in items:
+                mid = item.get("id") or item.get("model_id") or ""
+                if mid:
+                    ids.add(mid)
     except Exception as e:
-        log_warn(f"Cannot list models: {e}")
-    return []
+        log_warn(f"Cannot list /api/v1/models: {e}")
+
+    try:
+        r = requests.get(f"{LM_STUDIO_BASE}/v1/models", timeout=5)
+        if r.status_code == 200:
+            for item in r.json().get("data", []):
+                mid = item.get("id", "")
+                # Skip :N suffixed duplicate instances
+                if mid and ":" not in mid.split("/")[-1]:
+                    ids.add(mid)
+    except Exception as e:
+        log_warn(f"Cannot list /v1/models: {e}")
+
+    result = list(ids)
+    log_info(f"Available: {len(result)} models", {"ids": result})
+    return result
 
 
 def get_loaded_model_ids() -> list[str]:
@@ -827,6 +858,11 @@ def resolve_model_id(
         google/gemma-4-31b            → google/gemma-4-31b  (exact)
         microsoft/phi-4-reasoning-plus → microsoft/phi-4-reasoning-plus (exact)
     """
+    # Check confirmed map first — handles models from non-community HF orgs
+    if our_id in CONFIRMED_ID_MAP:
+        log_info(f"Resolved (confirmed map): {our_id} → {CONFIRMED_ID_MAP[our_id]}")
+        return CONFIRMED_ID_MAP[our_id]
+
     if not available_ids:
         return our_id
 
@@ -858,6 +894,14 @@ def resolve_model_id(
         if len(our_words & avail_words) >= 2:
             log_info(f"Resolved (words): {our_id} → {avail}")
             return avail
+
+    # Dynamic fallback: strip publisher prefix rather than returning a 404-prone ID.
+    # Models downloaded from non-lmstudio-community HF orgs appear in LM Studio
+    # as bare name only (no publisher prefix).
+    if "/" in our_id:
+        name_only = our_id.split("/", 1)[1]
+        log_warn(f"No ID match for {our_id} — falling back to name-only: {name_only}")
+        return name_only
 
     log_warn(f"No ID match for {our_id} — using as-is")
     return our_id
