@@ -9,6 +9,8 @@ try:
 except ImportError:
     WINDOWS = False
 
+RESULT_FILE = "temp_selection.txt"
+
 choices = {
     "1": "fastest",
     "2": "fast",
@@ -26,12 +28,12 @@ TIMEOUT  = 10
 def countdown():
     remaining = TIMEOUT
     while remaining > 0 and not done[0]:
-        print(
-            f"\r  Your choice (or wait {remaining}s "
-            f"to keep current preset): ",
-            end="",
-            flush=True
+        # Write directly to CON (Windows console) to bypass any redirection
+        sys.stderr.write(
+            f"\r  Press 1-6 to switch preset, or ENTER to keep current  "
+            f"({remaining}s) "
         )
+        sys.stderr.flush()
         time.sleep(1)
         remaining -= 1
     if not done[0]:
@@ -47,13 +49,29 @@ if WINDOWS:
         if msvcrt.kbhit():
             key = msvcrt.getwch()
             if key in choices:
+                sys.stderr.write(
+                    f"\r  ✓ Selected [{key}] → {choices[key].upper()}"
+                    f"                              \n"
+                )
+                sys.stderr.flush()
                 selected[0] = choices[key]
                 done[0]     = True
                 break
-            elif key in ["\r", "\n"]:
+            elif key in ("\r", "\n"):
+                sys.stderr.write(
+                    f"\r  ✓ [ENTER] → keeping current preset"
+                    f"                              \n"
+                )
+                sys.stderr.flush()
                 selected[0] = "KEEP"
                 done[0]     = True
                 break
+            else:
+                sys.stderr.write(
+                    f"\r  ✗ Unknown key — press 1-6 or ENTER"
+                    f"                              "
+                )
+                sys.stderr.flush()
 else:
     try:
         key = input()
@@ -67,6 +85,11 @@ else:
         done[0]     = True
 
 timer.join(timeout=TIMEOUT + 1)
-print()
+sys.stderr.write("\n")
+sys.stderr.flush()
+
 result = selected[0] if selected[0] else "KEEP"
-print(f"SELECTED:{result}")
+
+# Write result to file directly — stdout is no longer used for this
+with open(RESULT_FILE, "w") as f:
+    f.write(f"SELECTED:{result}\n")

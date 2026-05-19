@@ -65,7 +65,8 @@ echo.
 echo  [ENTER] Keep current preset and start
 echo.
 
-python preset_selector.py > temp_selection.txt 2>&1
+del temp_selection.txt >nul 2>&1
+python preset_selector.py
 
 set PRESET_CHOICE=KEEP
 for /f "tokens=2 delims=:" %%a in ('findstr "SELECTED" temp_selection.txt') do set PRESET_CHOICE=%%a

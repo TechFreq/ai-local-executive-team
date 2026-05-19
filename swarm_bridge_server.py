@@ -2745,11 +2745,93 @@ def run_preset_switcher():
             LM_STUDIO_BASE              as _LMS_BASE,
         )
 
-        # ── Which model to tune? ──────────────────────────────────
-        # Use whatever is currently loaded; fall back to CEO model.
-        loaded_status = get_loaded_model_status()
-        current_loaded = loaded_status.get("primary")
-        model_id = current_loaded or cfg.ceo_model
+        # ── Which model to tune? — let user pick ─────────────────
+        loaded_status  = get_loaded_model_status()
+        current_loaded = loaded_status.get("primary") or cfg.ceo_model
+
+        # Build a deduplicated ordered list of preset models with roles
+        _role_map: dict[str, list[str]] = {}
+        for role, mid in [
+            ("CEO",    cfg.ceo_model),
+            ("CTO",    cfg.cto_model),
+            ("CFO",    cfg.cfo_model),
+            ("CPO",    cfg.cpo_model),
+            ("COO",    cfg.coo_model),
+        ]:
+            _role_map.setdefault(mid, []).append(role)
+
+        _tune_options = list(_role_map.keys())   # unique models, insertion order
+
+        console.print(
+            "\n[bold yellow]  ══════════════════════════════════"
+            "══════════════════[/bold yellow]"
+        )
+        console.print("[bold yellow]  🔬 AUTO-TUNER — Select model[/bold yellow]")
+        console.print(
+            "[bold yellow]  ══════════════════════════════════"
+            "══════════════════[/bold yellow]"
+        )
+        for _i, _mid in enumerate(_tune_options, 1):
+            _roles  = "/".join(_role_map[_mid])
+            _marker = "  ◉ " if _mid == current_loaded else "    "
+            console.print(
+                f"[cyan]{_marker}[{_i}][/cyan]  "
+                f"[bold]{_mid}[/bold]  [dim]({_roles})[/dim]"
+            )
+        console.print(
+            f"\n[dim]  Currently loaded: {current_loaded}[/dim]"
+        )
+        console.print(
+            "[dim]  Press 1-"
+            f"{len(_tune_options)} to choose, or ENTER / wait 10s "
+            "to tune the loaded model[/dim]\n"
+        )
+
+        _pick = [current_loaded]
+        _pick_done = [False]
+
+        def _pick_countdown():
+            for _r in range(10, 0, -1):
+                if _pick_done[0]:
+                    return
+                sys.stderr.write(
+                    f"\r  Tuning: {_pick[0]}  ({_r}s)  "
+                )
+                sys.stderr.flush()
+                time.sleep(1)
+            _pick_done[0] = True
+
+        _pt = threading.Thread(target=_pick_countdown, daemon=True)
+        _pt.start()
+
+        while not _pick_done[0]:
+            if msvcrt.kbhit():
+                _k = msvcrt.getwch()
+                _ki = _k if isinstance(_k, str) else _k.decode("ascii", errors="ignore")
+                if _ki in [str(n) for n in range(1, len(_tune_options) + 1)]:
+                    _pick[0] = _tune_options[int(_ki) - 1]
+                    _pick_done[0] = True
+                    sys.stderr.write(
+                        f"\r  ✓ [{_ki}] → {_pick[0]}"
+                        f"                              \n"
+                    )
+                    sys.stderr.flush()
+                    break
+                elif _ki in ("\r", "\n"):
+                    _pick_done[0] = True
+                    sys.stderr.write(
+                        f"\r  ✓ [ENTER] → {_pick[0]}"
+                        f"                              \n"
+                    )
+                    sys.stderr.flush()
+                    break
+            time.sleep(0.05)
+
+        _pt.join(timeout=12)
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+        model_id = _pick[0]
 
         info    = _get_info(model_id)
         gpu_fit = info.get("gpu_fit", True)
