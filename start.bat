@@ -120,6 +120,14 @@ if errorlevel 1 (
 echo  [OK] LM Studio is running.
 echo.
 
+REM ── Sync models (auto-detect new/removed) ─
+echo  ==========================================
+echo    Syncing models with LM Studio...
+echo  ==========================================
+echo.
+python sync_models.py --apply
+echo.
+
 REM ── Load primary model ────────────────────
 echo  ==========================================
 echo    Loading primary model...
