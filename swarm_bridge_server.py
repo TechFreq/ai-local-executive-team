@@ -2492,13 +2492,14 @@ def run_preset_switcher():
         import requests as _req
         from load_model import (
             write_config_everywhere,
-            unload_model       as _unload,
+            unload_model                as _unload,
+            cleanup_duplicate_instances as _cleanup_dups,
             resolve_model_id,
             get_lm_studio_model_ids,
-            get_model_info     as _get_info,
+            get_model_info              as _get_info,
             save_learned_setting,
             run_load_attempt,
-            LM_STUDIO_BASE     as _LMS_BASE,
+            LM_STUDIO_BASE              as _LMS_BASE,
         )
 
         # ── Which model to tune? ──────────────────────────────────
@@ -2519,12 +2520,17 @@ def run_preset_switcher():
         is_gemma4 = "gemma-4" in model_id.lower()
 
         if is_gemma4:
-            # Gemma 4 has a confirmed flash-attn incompatibility on hybrid load
+            # Test FA=on variants too — llama.cpp may silently disable FA if
+            # the model's variable-size V embeddings are incompatible, in which
+            # case those configs will just score similarly to their FA=off peers
+            # and lose.  Let the benchmark decide instead of hard-coding off.
             test_matrix = [
-                {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "4K  q8/f16 FA=off"},
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "8K  q8/f16 FA=off"},
-                {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "2K  q8/f16 FA=off"},
-                {"context": 16384, "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "16K q8/f16 FA=off (ambitious)"},
+                {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
+                {"context": 4096,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "4K  q8/q8  FA=on"},
+                {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
+                {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8  FA=on"},
+                {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "2K  q8/f16 FA=off"},
+                {"context": 16384, "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q8/f16 FA=off (ambitious)"},
             ]
         elif gpu_fit and size_gb < 10:
             test_matrix = [
@@ -2535,12 +2541,14 @@ def run_preset_switcher():
                 {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
             ]
         else:
-            # Large hybrid
+            # Large hybrid — test FA=on variants too
             test_matrix = [
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "8K  q8/f16 FA=off"},
-                {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "4K  q8/f16 FA=off"},
-                {"context": 16384, "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "16K q8/f16 FA=off (ambitious)"},
-                {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16", "flash_attn": False, "label": "2K  q8/f16 FA=off (minimal)"},
+                {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
+                {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8  FA=on"},
+                {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
+                {"context": 4096,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "4K  q8/q8  FA=on"},
+                {"context": 16384, "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q8/f16 FA=off (ambitious)"},
+                {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "2K  q8/f16 FA=off (minimal)"},
             ]
 
         # ── Benchmark prompt — same every time for fair comparison ─
@@ -2624,6 +2632,9 @@ def run_preset_switcher():
 
         if lm_id != model_id:
             console.print(f"[dim]  LM ID: {lm_id}[/dim]\n")
+
+        # Clean up any orphaned duplicate instances left by a previous tune run
+        _cleanup_dups(lm_id)
 
         tune_results: list[dict] = []
         _stop_early = False
@@ -2799,10 +2810,24 @@ def run_preset_switcher():
 
             # Per-row note — explains WHY this config performed as it did
             notes = []
-            if cfg_r["flash_attn"] and not is_best:
-                notes.append("Flash Attn hurt this model on your GPU")
-            if cfg_r["flash_attn"] and is_best:
-                notes.append("Flash Attn helped on this model")
+            # Find the matching FA=off peer to judge whether FA actually helped
+            peer_tps = next(
+                (x["tps"] for x in successful
+                 if x["cfg"]["context"] == cfg_r["context"]
+                 and x["cfg"]["flash_attn"] != cfg_r["flash_attn"]
+                 and x["tps"] > 0),
+                None,
+            )
+            if cfg_r["flash_attn"]:
+                if is_best:
+                    notes.append("Flash Attention helped — keep it on")
+                elif peer_tps and tps >= peer_tps * 0.98:
+                    notes.append("FA matched FA=off — model may have disabled it internally")
+                else:
+                    notes.append("Flash Attention hurt this model on your GPU")
+            else:
+                if not is_best and peer_tps and peer_tps > tps * 1.02:
+                    notes.append("FA=on was faster at this context size")
             if cfg_r["context"] >= 16384 and is_best:
                 notes.append("max context + fast — great result")
             if cfg_r["context"] <= 2048 and not is_best:

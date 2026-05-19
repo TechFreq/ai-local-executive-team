@@ -12,12 +12,18 @@
 #   ✗  GET  /api/v1/models/status → 404
 #   ✗  Config in load payload    → "Unrecognized key: config"
 #
+# YOUR HARDWARE (confirmed from logs):
+#   GPU:  NVIDIA RTX 3060 — 12287 MiB VRAM
+#   VRAM free at load: ~11253 MiB
+#
 # KEY BEHAVIOURS CONFIRMED:
 #   • Unload requires instance_id not model name
 #   • Warmup can take 6-22s AFTER model appears in /v1/models
 #   • Gemma 4 is multimodal — loads vision encoder too during warmup
 #   • model-data.json is the real config file LM Studio reads
 #   • Config file write + unload strategy works for Gemma 4
+#   • Phi-4: 37/41 layers on GPU, 8.43GB, loads in ~3s + warmup
+#   • Gemma 4 31B: 27/61 layers on GPU, 17.39GB, n_ctx=2048 worked
 # ══════════════════════════════════════════════════════════════════
 
 import requests
@@ -48,16 +54,21 @@ _raw           = cfg.lm_studio_url
 LM_STUDIO_BASE = _raw.rstrip("/").removesuffix("/v1")
 LOAD_TIMEOUT   = cfg.load_timeout_secs
 
-# ── Hardware ─────────────────────────────────────────────────────
-# Update GPU_VRAM_GB and GPU_NAME to match your hardware.
-# These are used to calculate optimal context lengths.
+# ── instance_id cache — populated from load responses ─────────────
+# LM Studio requires instance_id to unload but doesn't expose it in
+# GET /api/v1/models.  We capture it from the POST /api/v1/models/load
+# response body and store it here so unload_model can use it.
+_instance_id_cache: dict[str, str] = {}
+
+# ── Hardware (confirmed from logs) ───────────────────────────────
 GPU_VRAM_GB      = 12.0
-GPU_VRAM_FREE_GB = 10.5
+GPU_VRAM_FREE_GB = 10.5   # ~11253 MiB free at load time
 GPU_NAME         = "NVIDIA RTX 3060 12GB"
 
 # ── Warmup buffer ────────────────────────────────────────────────
-# LM Studio returns HTTP 200 only after warmup completes.
-# Keep the POST connection alive — do not close it early.
+# Phi-4 warmup took up to 22s after model appeared in /v1/models
+# Gemma 4 warmup ~5s but also loads vision encoder
+# Keep POST connection alive — it returns 200 when warmup done
 POST_DETECT_WARMUP_SECS = 25
 
 # ── Logging ───────────────────────────────────────────────────────
@@ -130,6 +141,8 @@ def log_separator(label: str = ""):
 
 # ══════════════════════════════════════════════════════════════════
 # CONFIG FILE DISCOVERY
+# Scans ~/.lmstudio for json files, watches which ones change
+# during a load to find where LM Studio actually reads from
 # ══════════════════════════════════════════════════════════════════
 
 def scan_all_lmstudio_json_files() -> list[Path]:
@@ -166,6 +179,7 @@ def find_changed_json_files(
     """
     Compares current mtimes to snapshot.
     Returns files LM Studio modified during the load.
+    This tells us exactly where it reads config from.
     """
     changed = []
     current_files = scan_all_lmstudio_json_files()
@@ -182,6 +196,7 @@ def find_changed_json_files(
         except Exception:
             pass
 
+    # New files created during load
     for path_str in current_paths:
         if path_str not in before_mtimes:
             changed.append(Path(path_str))
@@ -270,6 +285,7 @@ def build_settings_payload(
 
     return {
         "load": {"fields": fields},
+        # Flat keys for newer LM Studio versions
         "contextLength":           context,
         "kvCacheQuantizationType": k_cache,
         "vCacheQuantizationType":  v_cache,
@@ -310,11 +326,23 @@ def _merge_into_global_config(
 ) -> dict:
     """
     Merges settings into model-data.json without clobbering other models.
+    Logs the full structure so we can learn the format over time.
     """
     log_info(
         f"Merging into model-data.json for {lm_id}",
         {"top_level_keys": list(existing.keys())[:15]}
     )
+
+    # Log full structure for analysis
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(
+                f"\n[MODEL-DATA.JSON STRUCTURE — {lm_id}]\n"
+                f"{json.dumps(existing, indent=2)[:5000]}\n"
+                f"[END MODEL-DATA.JSON]\n\n"
+            )
+    except Exception:
+        pass
 
     lm_lower = lm_id.lower()
     lm_name  = lm_id.split("/")[-1].lower()
@@ -393,7 +421,11 @@ def write_config_everywhere(
 ) -> tuple[int, list[Path]]:
     """
     Writes config to the right locations.
-    Uses confirmed paths if available, otherwise broad sweep.
+
+    Logic:
+        - If we have confirmed paths from a previous load → use only those
+        - Otherwise → broad sweep of all candidate locations
+        - Always include model-data.json if it exists (confirmed from logs)
     """
     parts           = lm_id.split("/", 1)
     publisher       = parts[0] if len(parts) == 2 else "unknown"
@@ -404,6 +436,7 @@ def write_config_everywhere(
     confirmed  = get_confirmed_config_paths(lm_id)
 
     if confirmed:
+        # We know what works — write only there
         paths_to_write = set(confirmed)
         if CONFIRMED_GLOBAL_CONFIG.exists():
             paths_to_write.add(CONFIRMED_GLOBAL_CONFIG)
@@ -411,6 +444,7 @@ def write_config_everywhere(
             f"Writing to {len(paths_to_write)} confirmed path(s)"
         )
     else:
+        # First time — broad sweep
         paths_to_write = set()
 
         if CONFIRMED_GLOBAL_CONFIG.exists():
@@ -481,13 +515,19 @@ def write_config_everywhere(
 
 # ══════════════════════════════════════════════════════════════════
 # UNLOAD
+# Requires instance_id — fetch it from /api/v1/models first
 # ══════════════════════════════════════════════════════════════════
 
 def get_model_instance_id(lm_id: str) -> str | None:
     """
-    Fetches the instance_id required for the unload endpoint.
-    GET /api/v1/models → find our model → return instance_id.
+    Returns the instance_id required for the unload endpoint.
+    Checks the load-response cache first, then falls back to GET /api/v1/models.
     """
+    # Fast path: we cached it when the model was loaded
+    cached = _instance_id_cache.get(lm_id)
+    if cached:
+        return cached
+
     try:
         r = requests.get(
             f"{LM_STUDIO_BASE}/api/v1/models", timeout=5
@@ -504,6 +544,7 @@ def get_model_instance_id(lm_id: str) -> str | None:
                 item_name = item_id.split("/")[-1]
 
                 if item_id == lm_lower or item_name == lm_name:
+                    # Log the full item to learn all available fields
                     log_info(
                         f"Model entry from /api/v1/models",
                         {"item": item}
@@ -536,6 +577,7 @@ def get_model_instance_id(lm_id: str) -> str | None:
 def unload_model(lm_id: str) -> bool:
     """
     Unloads a model, trying instance_id first then model name.
+    Even a failed unload attempt can clear LM Studio's cached config.
     """
     url = f"{LM_STUDIO_BASE}/api/v1/models/unload"
 
@@ -554,20 +596,44 @@ def unload_model(lm_id: str) -> bool:
         if r.status_code in (200, 201, 202, 204):
             log_success(f"Unloaded: {lm_id}")
             console.print(f"[dim]  → Unloaded {lm_id}[/dim]")
+            _instance_id_cache.pop(lm_id, None)
             return True
 
         if r.status_code == 404:
             log_info(f"Model not loaded (404): {lm_id}")
+            _instance_id_cache.pop(lm_id, None)
             return True
 
         log_warn(
             f"Unload returned {r.status_code}: {r.text[:300]}",
             {"payload": payload}
         )
-        return False
 
     except Exception as e:
         log_warn(f"Unload error (continuing): {e}")
+
+    # Fallback: TTL trick — send a 1-token request with model_ttl_seconds=0.
+    # LM Studio will unload the model after the request completes.
+    # Works even when we don't have instance_id.
+    log_warn(f"Trying TTL=0 fallback to eject {lm_id}")
+    try:
+        requests.post(
+            f"{LM_STUDIO_BASE}/v1/chat/completions",
+            json={
+                "model":             lm_id,
+                "messages":          [{"role": "user", "content": "x"}],
+                "max_tokens":        1,
+                "temperature":       0,
+                "model_ttl_seconds": 0,
+            },
+            timeout=30,
+        )
+        _instance_id_cache.pop(lm_id, None)
+        console.print(f"[dim]  → Ejected {lm_id} via TTL trick[/dim]")
+        time.sleep(2)
+        return True
+    except Exception as e:
+        log_warn(f"TTL fallback also failed: {e}")
         return False
 
 
@@ -586,6 +652,7 @@ def unload_any_loaded_model():
 
 # ══════════════════════════════════════════════════════════════════
 # MODEL ID RESOLUTION
+# LM Studio uses inconsistent ID formats
 # ══════════════════════════════════════════════════════════════════
 
 def get_lm_studio_model_ids() -> list[str]:
@@ -625,10 +692,11 @@ def get_loaded_model_ids() -> list[str]:
         pass
     return []
 
-
 def get_api_v0_state() -> dict[str, str]:
     """
-    GET /api/v0/models — returns state: "loaded" or "not-loaded"
+    GET /api/v0/models — confirmed from diagnostic to return:
+      state: "loaded" or "not-loaded" for each model
+      
     Returns dict of {lm_id: state}
     """
     try:
@@ -652,11 +720,15 @@ def get_api_v0_state() -> dict[str, str]:
 def is_model_already_loaded_correctly(lm_id: str) -> bool:
     """
     Checks /api/v0/models to see if model is already loaded.
+    Uses the state field which is confirmed present on your
+    LM Studio version.
+    
     Also checks for duplicate instances (:2) and logs them.
     """
     state_map = get_api_v0_state()
 
     if not state_map:
+        # Cannot confirm — do not skip load
         log_warn("Could not get state from /api/v0/models")
         return False
 
@@ -670,6 +742,7 @@ def is_model_already_loaded_correctly(lm_id: str) -> bool:
         mid_lower = mid.lower()
         mid_name  = mid.split("/")[-1].lower()
 
+        # Check for duplicate instance
         is_dup = ":" in mid and mid.split(":")[-1].isdigit()
 
         if mid_lower == lm_lower or mid_name == lm_name:
@@ -691,6 +764,7 @@ def is_model_already_loaded_correctly(lm_id: str) -> bool:
                 )
 
     if found_duplicate and not found_loaded:
+        # Only a duplicate exists — clean it up and reload properly
         log_warn(
             "Only duplicate instance found — "
             "will eject and reload cleanly"
@@ -721,6 +795,7 @@ def cleanup_duplicate_instances(lm_id: str):
             )
             log_warn(f"Ejecting duplicate instance: {mid}")
 
+            # TTL trick with the raw duplicate ID
             try:
                 requests.post(
                     f"{LM_STUDIO_BASE}/v1/chat/completions",
@@ -741,8 +816,7 @@ def cleanup_duplicate_instances(lm_id: str):
                 time.sleep(2)
             except Exception as e:
                 log_warn(f"Could not eject {mid}: {e}")
-
-
+                
 def resolve_model_id(
     our_id: str,
     available_ids: list[str],
@@ -750,6 +824,12 @@ def resolve_model_id(
     """
     Maps our registry ID to what LM Studio actually calls the model.
     Falls back to our_id if no match found.
+
+    Known mappings from logs:
+        qwen/qwq-32b                  → qwq-32b
+        qwen/qwen2.5-coder-14b        → qwen2.5-coder-14b-instruct
+        google/gemma-4-31b            → google/gemma-4-31b  (exact)
+        microsoft/phi-4-reasoning-plus → microsoft/phi-4-reasoning-plus (exact)
     """
     if not available_ids:
         return our_id
@@ -760,17 +840,20 @@ def resolve_model_id(
     our_name  = our_id.split("/")[-1].lower()
     our_lower = our_id.lower()
 
+    # Name part exact match
     for avail in available_ids:
         if avail.split("/")[-1].lower() == our_name:
             log_info(f"Resolved (name): {our_id} → {avail}")
             return avail
 
+    # Substring match
     for avail in available_ids:
         avail_lower = avail.lower()
         if our_lower in avail_lower or avail_lower in our_lower:
             log_info(f"Resolved (substr): {our_id} → {avail}")
             return avail
 
+    # Word overlap (handles nomic/embedding name differences)
     our_words = set(our_name.replace("-", " ").split())
     for avail in available_ids:
         avail_words = set(
@@ -800,18 +883,23 @@ def is_model_in_loaded_list(lm_id: str) -> bool:
 
 # ══════════════════════════════════════════════════════════════════
 # CONTEXT PICKER
+# Calibrated for RTX 3060 12GB from confirmed log data
 # ══════════════════════════════════════════════════════════════════
 
 def pick_context_for_model(size_gb: float, gpu_fit: bool) -> int:
     """
-    Picks the optimal context length based on available VRAM.
-    Calibrated for RTX 3060 12GB by default — adjust GPU_VRAM_GB above.
+    RTX 3060 12GB:
+        Phi-4 (8.43GB): 16384 ctx → 3200MB KV → ~11.6GB total ✅
+        Gemma 4 (17.39GB): 2048 ctx → 202+1225MB KV → loaded ✅
+
+    KV cache size scales roughly linearly with context.
     """
     COMPUTE_BUFFER_GB = 1.5
 
     if gpu_fit:
         available_for_kv = GPU_VRAM_FREE_GB - size_gb - COMPUTE_BUFFER_GB
     else:
+        # Hybrid: ~55% of model on GPU
         gpu_portion      = size_gb * 0.55
         available_for_kv = GPU_VRAM_FREE_GB - gpu_portion - COMPUTE_BUFFER_GB
 
@@ -870,6 +958,7 @@ def save_learned_setting(
     if config_paths:
         entry["confirmed_config_paths"] = [str(p) for p in config_paths]
     elif previous.get("confirmed_config_paths"):
+        # Keep existing confirmed paths
         entry["confirmed_config_paths"] = previous["confirmed_config_paths"]
 
     data[model_id] = entry
@@ -891,6 +980,8 @@ def get_learned_setting(model_id: str) -> dict:
 
 # ══════════════════════════════════════════════════════════════════
 # ATTEMPT LADDER
+# Builds the ordered list of settings to try.
+# Adapts based on whether config path is confirmed or not.
 # ══════════════════════════════════════════════════════════════════
 
 def build_attempt_ladder(model_id: str, learned: dict) -> list:
@@ -899,6 +990,7 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
     size_gb = info.get("size_gb", 8)
     name    = model_id.lower()
 
+    # Check if config path confirmed (means our writes are being read)
     confirmed_paths = get_confirmed_config_paths(model_id)
     config_works    = len(confirmed_paths) > 0
 
@@ -910,6 +1002,8 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
 
     if is_gemma4:
         if config_works:
+            # Config confirmed working — try progressively higher context
+            # Start at 4096, fall back to 2048 (known working), try 8192
             base_ladder = [
                 {
                     "label":        "Gemma4 (4096 K=q8 V=f16 FA=off) [config confirmed]",
@@ -918,7 +1012,10 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
                     "v_cache":      "f16",
                     "flash_attn":   False,
                     "unload_first": True,
-                    "note": "Config path confirmed. Trying higher context.",
+                    "note": (
+                        "Config path confirmed. "
+                        "Trying higher context than last time."
+                    ),
                 },
                 {
                     "label":        "Gemma4 (8192 K=q8 V=f16 FA=off) [ambitious]",
@@ -927,7 +1024,10 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
                     "v_cache":      "f16",
                     "flash_attn":   False,
                     "unload_first": True,
-                    "note": "Gemma 4 supports 262k ctx. Testing 8k on 12GB VRAM.",
+                    "note": (
+                        "Gemma 4 supports 262k ctx. "
+                        "Testing 8k on 12GB VRAM."
+                    ),
                 },
                 {
                     "label":        "Gemma4 (2048 K=q8 V=f16 FA=off) [known working]",
@@ -948,6 +1048,7 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
                 },
             ]
         else:
+            # First time — conservative, just get it loading
             base_ladder = [
                 {
                     "label":        f"Gemma4 ({start_ctx} K=q8 V=f16 FA=off) [unload first]",
@@ -996,6 +1097,7 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
             ]
 
     elif gpu_fit and size_gb < 10:
+        # Fits on GPU fully (confirmed: Phi-4 8.43GB on 12GB VRAM)
         base_ladder = [
             {
                 "label":        f"GPU ({start_ctx} Q8/Q8 FA=on)",
@@ -1032,6 +1134,7 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
         ]
 
     else:
+        # Large hybrid model on 12GB VRAM
         base_ladder = [
             {
                 "label":        f"Hybrid ({start_ctx} Q8/F16 FA=off) [unload first]",
@@ -1040,7 +1143,7 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
                 "v_cache":      "f16",
                 "flash_attn":   False,
                 "unload_first": True,
-                "note":         "Large model — GPU+RAM hybrid",
+                "note":         "Large model — GPU+RAM hybrid on 12GB",
             },
             {
                 "label":        f"Hybrid ({half_ctx} Q8/F16 FA=off) [unload first]",
@@ -1068,6 +1171,7 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
             },
         ]
 
+    # Prepend learned settings (put first — we know it worked before)
     if learned:
         learned_entry = {
             "label": (
@@ -1084,6 +1188,7 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
             "unload_first": True,
             "is_learned":   True,
         }
+        # Remove duplicate from base ladder
         base_ladder = [
             a for a in base_ladder
             if not (
@@ -1102,12 +1207,17 @@ def build_attempt_ladder(model_id: str, learned: dict) -> list:
 
 # ══════════════════════════════════════════════════════════════════
 # LOAD REQUEST
+# POST /api/v1/models/load — keep connection alive through warmup
 # ══════════════════════════════════════════════════════════════════
 
 def post_load_request(lm_id: str, result: dict):
     """
     Sends the load request and keeps the connection alive.
+
+    CRITICAL: From Phi-4 logs, "cancelled by client disconnect"
+    happens when we close this connection before warmup finishes.
     The POST returns 200 ONLY after warmup completes.
+    So we must NOT timeout this request during warmup.
     """
     url     = f"{LM_STUDIO_BASE}/api/v1/models/load"
     payload = {"model": lm_id}
@@ -1118,6 +1228,7 @@ def post_load_request(lm_id: str, result: dict):
         r = requests.post(
             url,
             json=payload,
+            # Long timeout: load + warmup (up to 22s) + buffer
             timeout=LOAD_TIMEOUT + POST_DETECT_WARMUP_SECS + 30,
         )
 
@@ -1125,6 +1236,19 @@ def post_load_request(lm_id: str, result: dict):
         log_info(f"Load response: HTTP {r.status_code}", {"body": raw_body})
 
         if r.status_code in (200, 201, 202):
+            # Cache instance_id so unload_model can use it
+            try:
+                rdata = r.json() if r.text else {}
+                iid = (
+                    rdata.get("instance_id")
+                    or rdata.get("data", {}).get("instance_id")
+                )
+                if iid:
+                    _instance_id_cache[lm_id] = iid
+                    log_info(f"Cached instance_id for {lm_id}: {iid}")
+            except Exception:
+                pass
+
             if not result.get("done"):
                 result["status"]  = "ok"
                 result["message"] = f"HTTP {r.status_code} (warmup complete)"
@@ -1157,6 +1281,7 @@ def post_load_request(lm_id: str, result: dict):
 
 # ══════════════════════════════════════════════════════════════════
 # POLLING
+# Detects model in /v1/models, then waits for POST to return 200
 # ══════════════════════════════════════════════════════════════════
 
 def poll_until_loaded(
@@ -1166,7 +1291,14 @@ def poll_until_loaded(
 ):
     """
     Polls /v1/models every 3s.
-    When model is detected, keeps POST connection alive through warmup.
+
+    Strategy:
+        - When model detected: set warmup_detected + timestamp
+        - Don't set done immediately (warmup still in progress)
+        - POST thread will set done=True when it gets 200
+        - If POST doesn't return within POST_DETECT_WARMUP_SECS,
+          set done ourselves as a safety net
+        - This keeps the HTTP connection alive through warmup
     """
     log_info(f"Polling for: {lm_id}")
     lm_name = lm_id.split("/")[-1].lower()
@@ -1174,6 +1306,7 @@ def poll_until_loaded(
     while not stop_event.is_set():
         time.sleep(3)
 
+        # If POST already finished (success or error), stop
         if result.get("done"):
             return
 
@@ -1198,6 +1331,7 @@ def poll_until_loaded(
                             f"keeping connection alive for warmup...[/dim]"
                         )
 
+                    # Safety net: if POST still hasn't returned
                     wait_time = (
                         time.time()
                         - result.get("warmup_detected_at", time.time())
@@ -1233,9 +1367,9 @@ def run_load_attempt(
     """
     One complete load attempt:
         1. Optionally unload (clears cached config in LM Studio)
-        2. Snapshot file mtimes
+        2. Snapshot file mtimes (to detect which config LM Studio reads)
         3. Write config to all known locations
-        4. POST /api/v1/models/load
+        4. POST /api/v1/models/load (keep alive through warmup)
         5. Poll /v1/models to detect when model appears
         6. After success: find which config files changed
         7. Return result
@@ -1249,6 +1383,7 @@ def run_load_attempt(
     }
     stop_event = threading.Event()
 
+    # Step 1: Unload if strategy requires it
     if attempt.get("unload_first"):
         console.print(
             f"[dim]  → Unloading to force config re-read...[/dim]"
@@ -1256,8 +1391,10 @@ def run_load_attempt(
         unload_model(lm_id)
         time.sleep(2)
 
+    # Step 2: Snapshot mtimes before load
     before_mtimes = get_all_json_mtimes()
 
+    # Step 3: Write config
     write_count, written_paths = write_config_everywhere(
         lm_id,
         attempt["context"],
@@ -1284,6 +1421,7 @@ def run_load_attempt(
         }
     )
 
+    # Step 4+5: Load + poll concurrently
     load_thread = threading.Thread(
         target=post_load_request,
         args=(lm_id, result),
@@ -1300,6 +1438,7 @@ def run_load_attempt(
     time.sleep(0.5)
     poll_thread.start()
 
+    # Progress display
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1338,6 +1477,7 @@ def run_load_attempt(
             )
             time.sleep(0.5)
 
+            # Hard safety timeout
             hard_limit = LOAD_TIMEOUT + POST_DETECT_WARMUP_SECS + 60
             if elapsed > hard_limit:
                 if not result.get("done"):
@@ -1353,6 +1493,7 @@ def run_load_attempt(
     poll_thread.join(timeout=5)
     result["elapsed"] = elapsed
 
+    # Step 6: Discover which config files LM Studio actually touched
     if result["status"] == "ok":
         changed = find_changed_json_files(before_mtimes)
         if changed:
@@ -1438,6 +1579,7 @@ def analyze_error(error_message: str) -> dict:
 
 # ══════════════════════════════════════════════════════════════════
 # MODEL REGISTRY
+# Sizes confirmed from logs where available
 # ══════════════════════════════════════════════════════════════════
 
 MODEL_REGISTRY = {
@@ -1445,12 +1587,12 @@ MODEL_REGISTRY = {
     "google/gemma-4-31b": {
         "name":         "Gemma 4 31B (CEO)",
         "role":         "CEO",
-        "size_gb":      17.39,
+        "size_gb":      17.39,  # Confirmed: "17.39 GiB" from logs
         "gpu_fit":      False,
-        "est_load_s":   30,
+        "est_load_s":   30,     # Confirmed: ~3s load + warmup
         "retail_equiv": "GPT-4o",
         "tok_per_sec":  "4-6",
-        "gpu_layers":   "27/61 on GPU",
+        "gpu_layers":   "27/61 on GPU",  # Confirmed from logs
         "known_issues": [
             "V Cache Quantization requires Flash Attention (confirmed)",
             "Unload + config rewrite strategy works (confirmed)",
@@ -1503,12 +1645,12 @@ MODEL_REGISTRY = {
     "microsoft/phi-4-reasoning-plus": {
         "name":         "Phi 4 Reasoning Plus (Backup)",
         "role":         "BACKUP",
-        "size_gb":      8.43,
+        "size_gb":      8.43,   # Confirmed: "8.43 GiB" from logs
         "gpu_fit":      True,
-        "est_load_s":   25,
+        "est_load_s":   25,     # ~3s load + up to 22s warmup
         "retail_equiv": "OpenAI o1 Mini",
         "tok_per_sec":  "35-45",
-        "gpu_layers":   "37/41 on GPU",
+        "gpu_layers":   "37/41 on GPU",  # Confirmed from logs
     },
     "qwen/qwen2.5-coder-14b-instruct": {
         "name":         "Qwen2.5 Coder 14B (COO)",
@@ -1601,7 +1743,7 @@ def print_model_card(model_id: str, learned: dict, lm_id: str):
     confirmed    = get_confirmed_config_paths(model_id)
 
     gpu_label = (
-        "[green]✅ Full GPU[/green]"
+        "[green]✅ Full GPU (fits on 12GB)[/green]"
         if info.get("gpu_fit")
         else "[yellow]⚠️  GPU+RAM Hybrid (>12GB)[/yellow]"
     )
@@ -1678,7 +1820,44 @@ def print_model_card(model_id: str, learned: dict, lm_id: str):
 
     console.print(f"[bold cyan]{'═' * 64}[/bold cyan]")
     console.print()
+def is_model_already_loaded_correctly(lm_id: str) -> bool:
+    """
+    Uses /api/v0/models which has the state field.
+    Confirmed working from your diagnostic output.
+    """
+    try:
+        resp = requests.get(
+            f"{LM_STUDIO_BASE}/api/v0/models",
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return False
 
+        models = resp.json().get("data", [])
+        lm_lower = lm_id.lower()
+        lm_name  = lm_id.split("/")[-1].lower()
+
+        for m in models:
+            mid   = m.get("id", "")
+            state = m.get("state", "not-loaded")
+
+            # Skip duplicate instances
+            if ":" in mid and mid.split(":")[-1].isdigit():
+                continue
+
+            mid_lower = mid.lower()
+            mid_name  = mid.split("/")[-1].lower()
+
+            if (
+                mid_lower == lm_lower
+                or mid_name == lm_name
+            ) and state == "loaded":
+                return True
+
+    except Exception as e:
+        log_warn(f"Could not check /api/v0/models: {e}")
+
+    return False
 
 def is_lm_studio_up() -> bool:
     try:
@@ -1690,17 +1869,20 @@ def is_lm_studio_up() -> bool:
 
 # ══════════════════════════════════════════════════════════════════
 # MAIN SMART LOADER
+# Fully automatic — never asks user to do anything manually
 # ══════════════════════════════════════════════════════════════════
 
 def wait_for_model(model_id: str) -> bool:
     """
     Full automatic loading sequence.
     Tries every setting combination, then falls back to another model.
+    Never tells the user to load manually.
     """
     log_separator(f"LOAD: {model_id}")
     log_info(f"GPU: {GPU_NAME} | VRAM: {GPU_VRAM_GB}GB")
     log_info(f"Warmup buffer: {POST_DETECT_WARMUP_SECS}s")
 
+    # ── LM Studio reachable? ──────────────────────────────────────
     if not is_lm_studio_up():
         console.print(
             "[red]✗ LM Studio not reachable on port 1234[/red]\n"
@@ -1710,8 +1892,11 @@ def wait_for_model(model_id: str) -> bool:
         log_error("LM Studio unreachable")
         return False
 
-    available_ids  = get_lm_studio_model_ids()
-    lm_studio_id   = resolve_model_id(model_id, available_ids)
+    # ── Discover available models ─────────────────────────────────
+    available_ids = get_lm_studio_model_ids()
+
+    # ── Resolve our ID to LM Studio's actual ID ───────────────────
+    lm_studio_id = resolve_model_id(model_id, available_ids)
 
     if lm_studio_id != model_id:
         console.print(
@@ -1719,15 +1904,20 @@ def wait_for_model(model_id: str) -> bool:
             f"→ [bold]{lm_studio_id}[/bold][/dim]"
         )
 
+    # ── Load learned settings ─────────────────────────────────────
     learned = get_learned_setting(model_id)
     info    = get_model_info(model_id)
 
     print_model_card(model_id, learned, lm_studio_id)
 
+    # ── CHECK IF ALREADY LOADED ───────────────────────────────────
+    # Uses /api/v0/models which has the state field
+    # Prevents duplicate instances and unnecessary reloads
     console.print(
         f"[dim]  Checking /api/v0/models for current state...[/dim]"
     )
 
+    # First clean up any duplicate instances
     cleanup_duplicate_instances(lm_studio_id)
 
     if is_model_already_loaded_correctly(lm_studio_id):
@@ -1750,6 +1940,7 @@ def wait_for_model(model_id: str) -> bool:
         f"[dim]  Not loaded — proceeding with load sequence[/dim]\n"
     )
 
+    # ── Build attempt ladder ──────────────────────────────────────
     ladder  = build_attempt_ladder(model_id, learned)
     success = False
 
@@ -1764,6 +1955,7 @@ def wait_for_model(model_id: str) -> bool:
         )
     console.print(f"[dim]  Log: {LOG_FILE}[/dim]\n")
 
+    # ── Attempt loop ──────────────────────────────────────────────
     for attempt in ladder:
         attempt_num = attempt["attempt"]
         context     = attempt["context"]
@@ -1866,6 +2058,7 @@ def wait_for_model(model_id: str) -> bool:
                 )
                 time.sleep(2)
 
+    # ── Automatic fallback — no manual prompt ─────────────────────
     if not success:
         console.print(
             f"\n[yellow]⚡ Primary failed — "
@@ -1888,6 +2081,7 @@ def wait_for_model(model_id: str) -> bool:
             )
             log_info(f"Trying fallback: {fallback_id} ({fb_lm_id})")
 
+            # Try ALL fallback attempts — not just the first
             for fb_attempt in fallback_ladder:
                 fb_result = run_load_attempt(
                     fb_lm_id, fb_attempt, fallback_info
@@ -1920,6 +2114,7 @@ def wait_for_model(model_id: str) -> bool:
                 )
                 time.sleep(1)
 
+        # Last resort: use whatever is already loaded
         already_loaded = get_loaded_model_ids()
         if already_loaded:
             mid = already_loaded[0]
@@ -1929,6 +2124,7 @@ def wait_for_model(model_id: str) -> bool:
             log_info(f"Using already-loaded: {mid}")
             return True
 
+        # Nothing worked — bridge starts anyway
         console.print(
             "\n[yellow]  No model loaded successfully.[/yellow]"
         )
@@ -2020,3 +2216,4 @@ if __name__ == "__main__":
             "[dim]Bridge starting — model will be used "
             "when available.[/dim]\n"
         )
+        log_warn("Session ended without confirmed model load")
