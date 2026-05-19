@@ -576,19 +576,35 @@ def get_model_instance_id(lm_id: str) -> str | None:
 
 def unload_model(lm_id: str) -> bool:
     """
-    Unloads a model, trying instance_id first then model name.
-    Even a failed unload attempt can clear LM Studio's cached config.
+    Unloads a model via POST /api/v1/models/unload with instance_id.
+    For the base instance the instance_id is just the model ID itself;
+    for duplicate instances it is the :N-suffixed ID from /v1/models.
     """
     url = f"{LM_STUDIO_BASE}/api/v1/models/unload"
 
+    # Cache hit → use what we stored from the load response
     instance_id = get_model_instance_id(lm_id)
 
-    if instance_id:
-        payload = {"instance_id": instance_id}
-        log_info(f"Unloading {lm_id} with instance_id: {instance_id}")
-    else:
-        payload = {"model": lm_id}
-        log_warn(f"No instance_id for {lm_id} — trying model name only")
+    if not instance_id:
+        # No cache: look in /v1/models for the base instance (no :N suffix)
+        loaded = get_loaded_model_ids()
+        lm_name = lm_id.split("/")[-1].lower()
+        for mid in loaded:
+            mid_name = mid.split("/")[-1].lower()
+            mid_base = mid_name.split(":")[0]
+            is_dup   = ":" in mid and mid.split(":")[-1].isdigit()
+            if not is_dup and (mid.lower() == lm_id.lower() or mid_base == lm_name):
+                instance_id = mid
+                log_info(f"Resolved instance_id from /v1/models: {instance_id}")
+                break
+
+    if not instance_id:
+        # Last resort: the base instance_id equals the model ID itself
+        instance_id = lm_id
+        log_warn(f"No instance_id resolved — using model ID as instance_id: {lm_id}")
+
+    payload = {"instance_id": instance_id}
+    log_info(f"Unloading {lm_id} with instance_id: {instance_id}")
 
     try:
         r = requests.post(url, json=payload, timeout=30)
@@ -719,66 +735,50 @@ def get_api_v0_state() -> dict[str, str]:
 
 def is_model_already_loaded_correctly(lm_id: str) -> bool:
     """
-    Checks /api/v0/models to see if model is already loaded.
-    Uses the state field which is confirmed present on your
-    LM Studio version.
-    
-    Also checks for duplicate instances (:2) and logs them.
+    Returns True if the model's BASE instance (no :N suffix) is present in
+    GET /v1/models, which is the only reliable "currently loaded" signal.
+    /api/v0/models state field is NOT reliable — it shows "not-loaded" even
+    when a model is actively loaded.
+
+    Duplicate :N instances are logged but do NOT count as "correctly loaded".
     """
-    state_map = get_api_v0_state()
+    loaded_ids = get_loaded_model_ids()   # /v1/models — shows real state
+    lm_name    = lm_id.split("/")[-1].lower()
 
-    if not state_map:
-        # Cannot confirm — do not skip load
-        log_warn("Could not get state from /api/v0/models")
-        return False
-
-    lm_lower = lm_id.lower()
-    lm_name  = lm_id.split("/")[-1].lower()
-
-    found_loaded    = False
+    found_base      = False
     found_duplicate = False
 
-    for mid, state in state_map.items():
-        mid_lower = mid.lower()
-        mid_name  = mid.split("/")[-1].lower()
+    for mid in loaded_ids:
+        mid_name = mid.split("/")[-1].lower()
+        mid_base = mid_name.split(":")[0]
+        is_dup   = ":" in mid and mid.split(":")[-1].isdigit()
 
-        # Check for duplicate instance
-        is_dup = ":" in mid and mid.split(":")[-1].isdigit()
-
-        if mid_lower == lm_lower or mid_name == lm_name:
+        if mid.lower() == lm_id.lower() or mid_base == lm_name:
             if is_dup:
                 found_duplicate = True
-                log_warn(
-                    f"Duplicate instance detected: {mid} "
-                    f"state={state}"
-                )
+                log_warn(f"Duplicate instance detected in /v1/models: {mid}")
                 console.print(
-                    f"[yellow]  ⚠ Duplicate instance: "
-                    f"{mid} — will clean up[/yellow]"
+                    f"[yellow]  ⚠ Duplicate instance: {mid} — will clean up[/yellow]"
                 )
-            elif state == "loaded":
-                found_loaded = True
-                log_info(
-                    f"Model already loaded: {mid} "
-                    f"state={state}"
+            else:
+                found_base = True
+                log_info(f"Model confirmed loaded via /v1/models: {mid}")
+                console.print(
+                    f"[dim]  ✓ Base instance confirmed loaded: {mid}[/dim]"
                 )
 
-    if found_duplicate and not found_loaded:
-        # Only a duplicate exists — clean it up and reload properly
-        log_warn(
-            "Only duplicate instance found — "
-            "will eject and reload cleanly"
-        )
+    if found_duplicate and not found_base:
+        log_warn("Only duplicate :N instance found — will eject and reload cleanly")
         return False
 
-    return found_loaded
+    return found_base
 
 
 def cleanup_duplicate_instances(lm_id: str):
     """
     Ejects all duplicate :N instances of a model visible in /v1/models.
-    Uses the TTL trick (model_ttl_seconds=0) since we don't have instance_ids
-    for instances we didn't load ourselves.
+    The :N suffix (e.g. google/gemma-4-e2b:2) IS the instance_id accepted by
+    POST /api/v1/models/unload — no TTL trick needed.
     Note: /api/v0/models does NOT show :N suffixed instances — /v1/models does.
     """
     lm_name = lm_id.split("/")[-1].lower()
@@ -797,19 +797,19 @@ def cleanup_duplicate_instances(lm_id: str):
             console.print(f"[yellow]  Ejecting duplicate: {mid}[/yellow]")
             log_warn(f"Ejecting duplicate instance: {mid}")
             try:
-                requests.post(
-                    f"{LM_STUDIO_BASE}/v1/chat/completions",
-                    json={
-                        "model":             mid,
-                        "messages":          [{"role": "user", "content": "x"}],
-                        "max_tokens":        1,
-                        "temperature":       0,
-                        "model_ttl_seconds": 0,
-                    },
-                    timeout=15,
+                # The :N suffix IS the instance_id — use the proper unload API
+                r = requests.post(
+                    f"{LM_STUDIO_BASE}/api/v1/models/unload",
+                    json={"instance_id": mid},
+                    timeout=30,
                 )
-                console.print(f"[dim]  ✓ Ejected {mid}[/dim]")
-                time.sleep(2)
+                if r.status_code in (200, 201, 202, 204):
+                    console.print(f"[dim]  ✓ Ejected {mid}[/dim]")
+                elif r.status_code == 404:
+                    console.print(f"[dim]  ✓ Already gone {mid}[/dim]")
+                else:
+                    log_warn(f"Unload {mid} returned {r.status_code}: {r.text[:200]}")
+                time.sleep(1)
             except Exception as e:
                 log_warn(f"Could not eject {mid}: {e}")
                 
@@ -1907,10 +1907,9 @@ def wait_for_model(model_id: str) -> bool:
     print_model_card(model_id, learned, lm_studio_id)
 
     # ── CHECK IF ALREADY LOADED ───────────────────────────────────
-    # Uses /api/v0/models which has the state field
-    # Prevents duplicate instances and unnecessary reloads
+    # Uses /v1/models (reliable) — /api/v0/models state field is NOT reliable
     console.print(
-        f"[dim]  Checking /api/v0/models for current state...[/dim]"
+        f"[dim]  Checking /v1/models for loaded instances...[/dim]"
     )
 
     # First clean up any duplicate instances
