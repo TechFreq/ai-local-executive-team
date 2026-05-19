@@ -2250,6 +2250,65 @@ def run_preset_switcher():
         print("  ==========================================")
         print("  Your choice: ", end="", flush=True)
 
+    def show_ready_banner(extra_line: str = ""):
+        """
+        Prints a compact "ready to chat" summary after any model operation.
+        Shows current preset + active model config + key controls.
+        """
+        from load_model import load_learned_settings as _load_ls
+        learned     = _load_ls()
+        model_id    = cfg.ceo_model
+        entry       = learned.get(model_id, {})
+        ctx         = entry.get("context",    "?")
+        k_cache     = entry.get("k_cache",    "?")
+        v_cache     = entry.get("v_cache",    "?")
+        fa          = entry.get("flash_attn", False)
+        used        = entry.get("success_count", 0)
+
+        fa_str  = "[green]on[/green]" if fa else "[dim]off[/dim]"
+        ctx_k   = f"{ctx // 1024}K" if isinstance(ctx, int) else str(ctx)
+
+        console.print(
+            "\n[bold green]══════════════════════════════════════"
+            "══════════════[/bold green]"
+        )
+        console.print(
+            "[bold green]  ◉ READY — send a message to start chatting"
+            "[/bold green]"
+        )
+        console.print(
+            "[bold green]══════════════════════════════════════"
+            "══════════════[/bold green]"
+        )
+        console.print(
+            f"[cyan]  Preset  :[/cyan]  {cfg.preset_name.upper()}"
+        )
+        console.print(
+            f"[cyan]  Model   :[/cyan]  {model_id}"
+        )
+        console.print(
+            f"[cyan]  Context :[/cyan]  {ctx_k} ({ctx:,} tokens)"
+            if isinstance(ctx, int) else
+            f"[cyan]  Context :[/cyan]  {ctx}"
+        )
+        console.print(
+            f"[cyan]  K cache :[/cyan]  {k_cache}   "
+            f"[cyan]V cache:[/cyan]  {v_cache}   "
+            f"[cyan]FA:[/cyan]  {fa_str}"
+        )
+        if used:
+            console.print(f"[dim]  Loaded {used}x — settings learned[/dim]")
+        if extra_line:
+            console.print(f"[dim]  {extra_line}[/dim]")
+        console.print(
+            "[dim]  Keys: SPACE=preset  C=context  F=flash-attn  "
+            "T=tune  O=optimize  X=abort  S=status[/dim]"
+        )
+        console.print(
+            "[bold green]══════════════════════════════════════"
+            "══════════════[/bold green]\n"
+        )
+
     def do_switch(preset_name: str):
         if preset_name == cfg.preset_name.lower():
             console.print(
@@ -2438,6 +2497,7 @@ def run_preset_switcher():
             "[bold cyan]  ══════════════════════════════════════"
             "══════════════[/bold cyan]\n"
         )
+        show_ready_banner("Model reloaded and optimized")
 
     def do_status():
         loaded = get_loaded_model_status()
@@ -2472,6 +2532,189 @@ def run_preset_switcher():
             "[bold cyan]  ════════════════════════"
             "════════════════[/bold cyan]\n"
         )
+
+    def do_set_context():
+        """
+        Cycle context window: 2048 → 4096 → 8192 → 16384 → 2048.
+        Writes config, reloads model, saves to learned_settings.
+        """
+        from load_model import (
+            write_config_everywhere,
+            unload_model                as _unload,
+            cleanup_duplicate_instances as _cleanup_dups,
+            resolve_model_id,
+            get_lm_studio_model_ids,
+            get_model_info              as _get_info,
+            save_learned_setting,
+            run_load_attempt,
+            load_learned_settings       as _load_ls,
+            LM_STUDIO_BASE              as _LMS_BASE,
+        )
+
+        CONTEXT_STEPS = [2048, 4096, 8192, 16384]
+
+        loaded_status  = get_loaded_model_status()
+        model_id       = loaded_status.get("primary") or cfg.ceo_model
+        info           = _get_info(model_id)
+        name           = info.get("name", model_id)
+        learned        = _load_ls().get(model_id, {})
+
+        current_ctx    = learned.get("context", 4096)
+        k_cache        = learned.get("k_cache",  "q8_0")
+        v_cache        = learned.get("v_cache",  "f16")
+        flash_attn     = learned.get("flash_attn", False)
+
+        # Pick next step in the cycle
+        try:
+            idx = CONTEXT_STEPS.index(current_ctx)
+        except ValueError:
+            idx = 0
+        new_ctx = CONTEXT_STEPS[(idx + 1) % len(CONTEXT_STEPS)]
+
+        console.print(
+            f"\n[bold yellow]  ⟳ Context: "
+            f"{current_ctx} → [bold]{new_ctx}[/bold] tokens[/bold yellow]"
+        )
+        console.print(f"[dim]  Model: {name}[/dim]")
+
+        try:
+            available_ids = get_lm_studio_model_ids()
+            lm_id         = resolve_model_id(model_id, available_ids)
+        except Exception as e:
+            console.print(f"[red]  ✗ Cannot resolve model ID: {e}[/red]\n")
+            return
+
+        try:
+            _cleanup_dups(lm_id)
+            _unload(lm_id)
+            import time as _time; _time.sleep(1.5)
+            write_config_everywhere(lm_id, new_ctx, k_cache, v_cache, flash_attn)
+            _time.sleep(0.5)
+
+            attempt = {
+                "attempt":      1,
+                "context":      new_ctx,
+                "k_cache":      k_cache,
+                "v_cache":      v_cache,
+                "flash_attn":   flash_attn,
+                "label":        f"Manual ctx={new_ctx}",
+                "unload_first": False,
+            }
+            result = run_load_attempt(lm_id, attempt, info)
+
+            if result.get("status") == "ok":
+                save_learned_setting(
+                    model_id, new_ctx, k_cache, v_cache,
+                    result.get("elapsed", 0), flash_attn,
+                    config_paths=result.get("confirmed_config_paths"),
+                )
+                console.print(
+                    f"[bold green]  ✓ Context set to {new_ctx} tokens "
+                    f"and saved[/bold green]\n"
+                )
+                show_ready_banner(f"Context: {new_ctx:,} tokens")
+            else:
+                console.print(
+                    f"[yellow]  ⚠ Load failed — reverted? "
+                    f"Try O to reload.[/yellow]\n"
+                )
+        except Exception as e:
+            console.print(f"[red]  ✗ Context change failed: {e}[/red]\n")
+
+    def do_toggle_fa():
+        """
+        Toggle Flash Attention on ↔ off.
+        When enabling FA, switches V cache to q8_0 (required for FA).
+        When disabling FA, switches V cache back to f16.
+        Writes config, reloads model, saves to learned_settings.
+        """
+        from load_model import (
+            write_config_everywhere,
+            unload_model                as _unload,
+            cleanup_duplicate_instances as _cleanup_dups,
+            resolve_model_id,
+            get_lm_studio_model_ids,
+            get_model_info              as _get_info,
+            save_learned_setting,
+            run_load_attempt,
+            load_learned_settings       as _load_ls,
+            LM_STUDIO_BASE              as _LMS_BASE,
+        )
+
+        loaded_status  = get_loaded_model_status()
+        model_id       = loaded_status.get("primary") or cfg.ceo_model
+        info           = _get_info(model_id)
+        name           = info.get("name", model_id)
+        learned        = _load_ls().get(model_id, {})
+
+        current_fa  = learned.get("flash_attn", False)
+        context     = learned.get("context",    4096)
+        k_cache     = learned.get("k_cache",   "q8_0")
+        new_fa      = not current_fa
+
+        # FA requires q8/q8 KV; without FA use q8/f16
+        new_v_cache = "q8_0" if new_fa else "f16"
+
+        console.print(
+            f"\n[bold yellow]  ⟳ Flash Attention: "
+            f"{'off' if current_fa else 'on'} → "
+            f"[bold]{'on' if new_fa else 'off'}[/bold][/bold yellow]"
+        )
+        if new_fa:
+            console.print(
+                f"[dim]  V cache: f16 → q8_0  "
+                f"(required for FA)[/dim]"
+            )
+        else:
+            console.print(
+                f"[dim]  V cache: q8_0 → f16  "
+                f"(restored for FA=off)[/dim]"
+            )
+        console.print(f"[dim]  Model: {name}[/dim]")
+
+        try:
+            available_ids = get_lm_studio_model_ids()
+            lm_id         = resolve_model_id(model_id, available_ids)
+        except Exception as e:
+            console.print(f"[red]  ✗ Cannot resolve model ID: {e}[/red]\n")
+            return
+
+        try:
+            _cleanup_dups(lm_id)
+            _unload(lm_id)
+            import time as _time; _time.sleep(1.5)
+            write_config_everywhere(lm_id, context, k_cache, new_v_cache, new_fa)
+            _time.sleep(0.5)
+
+            attempt = {
+                "attempt":      1,
+                "context":      context,
+                "k_cache":      k_cache,
+                "v_cache":      new_v_cache,
+                "flash_attn":   new_fa,
+                "label":        f"Manual FA={'on' if new_fa else 'off'}",
+                "unload_first": False,
+            }
+            result = run_load_attempt(lm_id, attempt, info)
+
+            if result.get("status") == "ok":
+                save_learned_setting(
+                    model_id, context, k_cache, new_v_cache,
+                    result.get("elapsed", 0), new_fa,
+                    config_paths=result.get("confirmed_config_paths"),
+                )
+                console.print(
+                    f"[bold green]  ✓ Flash Attention "
+                    f"{'enabled' if new_fa else 'disabled'} "
+                    f"and saved[/bold green]\n"
+                )
+                show_ready_banner(f"Flash Attention {'on' if new_fa else 'off'}, V cache → {new_v_cache}")
+            else:
+                console.print(
+                    f"[yellow]  ⚠ Load failed — try O to reload.[/yellow]\n"
+                )
+        except Exception as e:
+            console.print(f"[red]  ✗ FA toggle failed: {e}[/red]\n")
 
     def do_tune():
         """
@@ -2973,6 +3216,7 @@ def run_preset_switcher():
 
         # Final sweep — eject any :N orphans left over from this or prior runs
         _cleanup_dups(lm_id)
+        show_ready_banner("Tuned — winner config active")
 
     in_menu = False
 
@@ -3006,6 +3250,10 @@ def run_preset_switcher():
                         do_status()
                     elif key in (b"t", b"T"):
                         do_tune()
+                    elif key in (b"c", b"C"):
+                        do_set_context()
+                    elif key in (b"f", b"F"):
+                        do_toggle_fa()
                     continue
 
                 if key in (b"\x1b", b"q", b"Q"):
@@ -3087,6 +3335,8 @@ if __name__ == "__main__":
 [bold white]  X[/bold white]       →  Abort current generation
 [bold white]  O[/bold white]       →  Optimize / reload current model + perf report
 [bold white]  T[/bold white]       →  Tune — benchmark configs, save best to learned_settings
+[bold white]  C[/bold white]       →  Cycle context window  2048→4096→8192→16384→...
+[bold white]  F[/bold white]       →  Toggle Flash Attention on/off (adjusts V cache too)
 [bold white]  S[/bold white]       →  Show bridge status
 [bold white]  Ctrl+C[/bold white]  →  Stop bridge completely
 [bold yellow]════════════════════════════════════════════════════════[/bold yellow]
