@@ -180,9 +180,19 @@ def resolve_lm_id(our_id: str) -> str:
 
     except Exception as e:
         console.print(
-            f"[yellow]  ⚠ ID resolution failed for {our_id}: "
+            f"[yellow]  ID resolution failed for {our_id}: "
             f"{e}[/yellow]"
         )
+
+    # Dynamic fallback: strip publisher prefix rather than returning a 404-prone ID.
+    # Models downloaded from non-lmstudio-community HF orgs (Qwen, DeepSeek, etc.)
+    # appear in LM Studio as bare name with no publisher prefix.
+    if "/" in our_id:
+        name_only = our_id.split("/", 1)[1]
+        console.print(
+            f"[dim]  ID fallback: {our_id} -> {name_only}[/dim]"
+        )
+        return name_only
 
     return our_id
 
