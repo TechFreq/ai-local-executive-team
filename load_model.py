@@ -776,43 +776,39 @@ def is_model_already_loaded_correctly(lm_id: str) -> bool:
 
 def cleanup_duplicate_instances(lm_id: str):
     """
-    Ejects any duplicate :2 instances of a model.
-    Uses TTL trick since instance_id is not in /api/v0/models.
+    Ejects all duplicate :N instances of a model visible in /v1/models.
+    Uses the TTL trick (model_ttl_seconds=0) since we don't have instance_ids
+    for instances we didn't load ourselves.
+    Note: /api/v0/models does NOT show :N suffixed instances — /v1/models does.
     """
-    state_map = get_api_v0_state()
-    lm_name   = lm_id.split("/")[-1].lower()
+    lm_name = lm_id.split("/")[-1].lower()
 
-    for mid, state in state_map.items():
-        if state != "loaded":
-            continue
+    # /v1/models is the correct endpoint — it lists every loaded instance
+    # including the :2, :3... duplicates that /api/v0/models hides.
+    loaded_ids = get_loaded_model_ids()
 
+    for mid in loaded_ids:
         mid_name = mid.split("/")[-1].lower()
-        is_dup   = ":" in mid and mid.split(":")[-1].isdigit()
+        # Strip the :N suffix before comparing names
+        mid_base_name = mid_name.split(":")[0]
+        is_dup = ":" in mid and mid.split(":")[-1].isdigit()
 
-        if is_dup and mid_name == lm_name:
-            console.print(
-                f"[yellow]  Ejecting duplicate: {mid}[/yellow]"
-            )
+        if is_dup and mid_base_name == lm_name:
+            console.print(f"[yellow]  Ejecting duplicate: {mid}[/yellow]")
             log_warn(f"Ejecting duplicate instance: {mid}")
-
-            # TTL trick with the raw duplicate ID
             try:
                 requests.post(
                     f"{LM_STUDIO_BASE}/v1/chat/completions",
                     json={
                         "model":             mid,
-                        "messages":          [
-                            {"role": "user", "content": "x"}
-                        ],
+                        "messages":          [{"role": "user", "content": "x"}],
                         "max_tokens":        1,
                         "temperature":       0,
                         "model_ttl_seconds": 0,
                     },
                     timeout=15,
                 )
-                console.print(
-                    f"[dim]  ✓ Ejected {mid}[/dim]"
-                )
+                console.print(f"[dim]  ✓ Ejected {mid}[/dim]")
                 time.sleep(2)
             except Exception as e:
                 log_warn(f"Could not eject {mid}: {e}")

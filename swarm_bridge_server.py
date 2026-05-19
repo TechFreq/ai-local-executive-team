@@ -2971,6 +2971,9 @@ def run_preset_switcher():
         except Exception as e:
             console.print(f"[red]  ✗ Failed to apply winner: {e}[/red]\n")
 
+        # Final sweep — eject any :N orphans left over from this or prior runs
+        _cleanup_dups(lm_id)
+
     in_menu = False
 
     try:
