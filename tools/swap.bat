@@ -44,7 +44,9 @@ echo  [7] CUSTOM     - Edit config.yaml directly
 echo.
 echo  [8] List all presets
 echo.
-set /p choice="  Enter 1-8: "
+echo  [9] Sync models  - scan LM Studio for new/removed models
+echo.
+set /p choice="  Enter 1-9: "
 
 if "%choice%"=="1" set PRESET=fastest
 if "%choice%"=="2" set PRESET=fast
@@ -54,6 +56,7 @@ if "%choice%"=="5" set PRESET=nuclear
 if "%choice%"=="6" set PRESET=gemma12b
 if "%choice%"=="7" goto custom
 if "%choice%"=="8" goto list_presets
+if "%choice%"=="9" goto sync_models
 if "%PRESET%"=="" goto invalid
 
 goto switch_preset
@@ -102,9 +105,28 @@ echo.
 pause
 goto end
 
+:sync_models
+echo.
+echo  ==========================================
+echo    Syncing models with LM Studio...
+echo  ==========================================
+echo.
+echo  Make sure LM Studio is open and its server is running.
+echo.
+cd /d "%~dp0.."
+python sync_models.py --apply
+echo.
+echo  ==========================================
+echo    Done. Check config/my_models.yaml to
+echo    activate any newly found model in a role.
+echo  ==========================================
+echo.
+pause
+goto end
+
 :invalid
 echo.
-echo    Invalid choice. Run again and pick 1-8.
+echo    Invalid choice. Run again and pick 1-9.
 echo.
 pause
 
