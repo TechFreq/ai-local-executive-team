@@ -143,14 +143,17 @@ MODEL_TIMEOUTS: dict[str, int] = {
     "google/gemma-4-31b":                    180,
     "qwen/qwen3-coder-30b":                  180,
     "deepseek/deepseek-r1-distill-qwen-32b": 180,
+    "qwen/qwen3.6-35b-a3b":                  180,
     "google/gemma-4-26b-a4b":                180,
     "qwen/qwq-32b":                          180,
+    "mistralai/devstral-small-2-2512":       120,
     "qwen/qwen2.5-coder-14b-instruct":        90,
     "microsoft/phi-4-reasoning-plus":          90,
     "deepseek/deepseek-r1-0528-qwen3-8b":     90,
     "qwen/qwen3.5-9b":                         90,
     "google/gemma-3-12b":                      60,
     "qwen/qwen2.5-vl-7b-instruct":             60,
+    "google/gemma-4-e4b":                      30,
     "google/gemma-4-e2b":                      30,
     "nomic-ai/nomic-embed-text-v1.5":          30,
 }
@@ -294,16 +297,23 @@ ROLE_COLORS = {
 # ══════════════════════════════════════════════════════════════════
 
 def _print_waiting():
+    bridge_url = f"http://{cfg.bridge_host}:{cfg.bridge_port}/v1"
+    preset     = cfg.preset_name.upper()
     console.print()
+    console.print("[dim]  ════════════════════════════════════════════════════════[/dim]")
+    console.print("[bold cyan]  ◉ Ready — waiting for next chat request[/bold cyan]")
     console.print(
-        "[dim]  ═══════════════════════════════════════════════[/dim]"
+        f"[dim]  Preset:[/dim] [bold]{preset}[/bold]"
+        f"[dim]  │  Use model:[/dim] [bold cyan]executive-swarm[/bold cyan]"
+        f"[dim]  │  {bridge_url}[/dim]"
     )
-    console.print(
-        "[bold cyan]  ◉ Ready — waiting for next chat request[/bold cyan]"
-    )
-    console.print(
-        "[dim]  ═══════════════════════════════════════════════[/dim]"
-    )
+    console.print("[dim]  Chat via: Open WebUI · Zed · VS Code/Continue · LiteProxy[/dim]")
+    console.print("[dim]            (not this terminal — keyboard controls only)[/dim]")
+    console.print("[dim]  ────────────────────────────────────────────────────────[/dim]")
+    console.print("[dim]  SPACE preset  │  X abort  │  T tune  │  O optimize[/dim]")
+    console.print("[dim]  C context     │  F flash   │  S status │  Ctrl+C quit[/dim]")
+    console.print("[dim]  ════════════════════════════════════════════════════════[/dim]")
+    console.print()
     console.print()
 
 
@@ -316,7 +326,7 @@ BRIDGE_MODEL_LIST = [
         "id":             "executive-swarm",
         "name":           "🏛️ Executive Swarm — Full Board",
         "description":    "CEO + CTO + CFO + CPO + COO collaborate",
-        "context_length": 8192,
+        "context_length": 16384,
         "capabilities":   ["chat"],
         "route":          "full_board",
         "size_label":     "Multi-Model",
@@ -325,7 +335,7 @@ BRIDGE_MODEL_LIST = [
         "id":             "google/gemma-4-31b",
         "name":           "👑 CEO — Gemma 4 31B (GPT-4o)",
         "description":    "Strategic decisions. Multimodal.",
-        "context_length": 2048,
+        "context_length": 8192,
         "capabilities":   ["chat", "vision"],
         "route":          "ceo",
         "size_label":     "31B",
@@ -334,7 +344,7 @@ BRIDGE_MODEL_LIST = [
         "id":             "qwen/qwen3-coder-30b",
         "name":           "⚙️ CTO — Qwen3 Coder 30B (Claude Sonnet)",
         "description":    "Architecture, code, security",
-        "context_length": 8192,
+        "context_length": 16384,
         "capabilities":   ["chat"],
         "route":          "cto",
         "size_label":     "30B",
@@ -343,28 +353,28 @@ BRIDGE_MODEL_LIST = [
         "id":             "deepseek/deepseek-r1-distill-qwen-32b",
         "name":           "📊 CFO — DeepSeek R1 32B (o1 Preview)",
         "description":    "Cost, risk, deep reasoning",
-        "context_length": 8192,
+        "context_length": 16384,
         "capabilities":   ["chat"],
         "route":          "cfo",
         "size_label":     "32B",
     },
     {
-        "id":             "google/gemma-4-26b-a4b",
-        "name":           "🎯 CPO — Gemma 4 26B MoE (Claude Sonnet)",
+        "id":             "qwen/qwen3.6-35b-a3b",
+        "name":           "🎯 CPO — Qwen3.6 35B MoE (Claude Sonnet)",
         "description":    "Product strategy, UX, features",
-        "context_length": 4096,
-        "capabilities":   ["chat"],
-        "route":          "cpo",
-        "size_label":     "26B",
-    },
-    {
-        "id":             "qwen/qwen2.5-coder-14b-instruct",
-        "name":           "📋 COO — Qwen2.5 Coder 14B (Copilot Pro)",
-        "description":    "Tasks, timelines, execution",
         "context_length": 16384,
         "capabilities":   ["chat"],
+        "route":          "cpo",
+        "size_label":     "35B",
+    },
+    {
+        "id":             "mistralai/devstral-small-2-2512",
+        "name":           "📋 COO — Devstral Small 2 (Copilot Pro)",
+        "description":    "Agentic coding, tasks, execution",
+        "context_length": 32768,
+        "capabilities":   ["chat"],
         "route":          "coo",
-        "size_label":     "14B",
+        "size_label":     "24B",
     },
     {
         "id":             "microsoft/phi-4-reasoning-plus",
@@ -379,7 +389,7 @@ BRIDGE_MODEL_LIST = [
         "id":             "qwen/qwq-32b",
         "name":           "⚡ QwQ 32B Reasoning (o1 Preview)",
         "description":    "Extended reasoning with think blocks",
-        "context_length": 8192,
+        "context_length": 16384,
         "capabilities":   ["chat"],
         "route":          "direct",
         "size_label":     "32B",
@@ -388,7 +398,7 @@ BRIDGE_MODEL_LIST = [
         "id":             "deepseek/deepseek-r1-0528-qwen3-8b",
         "name":           "🔍 DeepSeek R1 8B Fast (GPT-4o Mini + Reasoning)",
         "description":    "Fast reasoning, full GPU on 12GB",
-        "context_length": 16384,
+        "context_length": 32768,
         "capabilities":   ["chat"],
         "route":          "direct",
         "size_label":     "8B",
@@ -397,7 +407,7 @@ BRIDGE_MODEL_LIST = [
         "id":             "qwen/qwen3.5-9b",
         "name":           "🌐 Qwen3.5 9B (GPT-4o Mini)",
         "description":    "Fast general purpose",
-        "context_length": 16384,
+        "context_length": 32768,
         "capabilities":   ["chat"],
         "route":          "direct",
         "size_label":     "9B",
@@ -421,13 +431,13 @@ BRIDGE_MODEL_LIST = [
         "size_label":     "7B",
     },
     {
-        "id":             "google/gemma-4-e2b",
-        "name":           "💨 Gemma 4 E2B (Gemini Flash)",
-        "description":    "Tiny and fast — 80+ tok/s autocomplete",
+        "id":             "google/gemma-4-e4b",
+        "name":           "💨 Gemma 4 E4B (Gemini Flash)",
+        "description":    "Tiny and fast — 60+ tok/s autocomplete",
         "context_length": 8192,
         "capabilities":   ["chat"],
         "route":          "direct",
-        "size_label":     "2B",
+        "size_label":     "4B",
     },
     {
         "id":             "nomic-ai/nomic-embed-text-v1.5",
@@ -448,8 +458,8 @@ _EXECUTIVE_ROUTES = {
     "google/gemma-4-31b":                    "ceo",
     "qwen/qwen3-coder-30b":                  "cto",
     "deepseek/deepseek-r1-distill-qwen-32b": "cfo",
-    "google/gemma-4-26b-a4b":                "cpo",
-    "qwen/qwen2.5-coder-14b-instruct":       "coo",
+    "qwen/qwen3.6-35b-a3b":                  "cpo",
+    "mistralai/devstral-small-2-2512":        "coo",
     "qwen/qwen2.5-vl-7b-instruct":           "vision",
 }
 
@@ -463,6 +473,8 @@ MODEL_NAME_MAP = {
     "gemma4-31b":          "google/gemma-4-31b",
     "qwen3-coder-30b":     "qwen/qwen3-coder-30b",
     "deepseek-r1-32b":     "deepseek/deepseek-r1-distill-qwen-32b",
+    "qwen3.6-35b-a3b":     "qwen/qwen3.6-35b-a3b",
+    "devstral-small":      "mistralai/devstral-small-2-2512",
     "gemma4-26b-a4b":      "google/gemma-4-26b-a4b",
     "qwen2.5-coder-14b":   "qwen/qwen2.5-coder-14b-instruct",
     "phi4-reasoning-plus": "microsoft/phi-4-reasoning-plus",
@@ -471,6 +483,7 @@ MODEL_NAME_MAP = {
     "qwen3.5-9b":          "qwen/qwen3.5-9b",
     "gemma3-12b":          "google/gemma-3-12b",
     "qwen2.5-vl-7b":       "qwen/qwen2.5-vl-7b-instruct",
+    "gemma4-4b":           "google/gemma-4-e4b",
     "gemma4-2b":           "google/gemma-4-e2b",
     "nomic-embed-text":    "nomic-ai/nomic-embed-text-v1.5",
 }
@@ -482,6 +495,8 @@ _OLLAMA_META = {
     "gemma4-31b":          {"family": "gemma",      "families": ["gemma"],      "size": 18600000000, "parameter_size": "31B"},
     "qwen3-coder-30b":     {"family": "qwen2",      "families": ["qwen2"],      "size": 18000000000, "parameter_size": "30B"},
     "deepseek-r1-32b":     {"family": "qwen2",      "families": ["qwen2"],      "size": 19200000000, "parameter_size": "32B"},
+    "qwen3.6-35b-a3b":     {"family": "qwen2",      "families": ["qwen2"],      "size": 21000000000, "parameter_size": "35B"},
+    "devstral-small":      {"family": "mistral",    "families": ["mistral"],    "size": 14400000000, "parameter_size": "24B"},
     "gemma4-26b-a4b":      {"family": "gemma",      "families": ["gemma"],      "size": 15600000000, "parameter_size": "26B"},
     "qwen2.5-coder-14b":   {"family": "qwen2",      "families": ["qwen2"],      "size": 8400000000,  "parameter_size": "14B"},
     "phi4-reasoning-plus": {"family": "phi",        "families": ["phi"],        "size": 8400000000,  "parameter_size": "14B"},
@@ -490,6 +505,7 @@ _OLLAMA_META = {
     "qwen3.5-9b":          {"family": "qwen2",      "families": ["qwen2"],      "size": 5400000000,  "parameter_size": "9B"},
     "gemma3-12b":          {"family": "gemma",      "families": ["gemma"],      "size": 7200000000,  "parameter_size": "12B"},
     "qwen2.5-vl-7b":       {"family": "qwen2",      "families": ["qwen2"],      "size": 4200000000,  "parameter_size": "7B"},
+    "gemma4-4b":           {"family": "gemma",      "families": ["gemma"],      "size": 3700000000,  "parameter_size": "4B"},
     "gemma4-2b":           {"family": "gemma",      "families": ["gemma"],      "size": 1200000000,  "parameter_size": "2B"},
     "nomic-embed-text":    {"family": "nomic-bert", "families": ["nomic-bert"], "size": 274000000,   "parameter_size": "137M"},
 }
@@ -511,8 +527,8 @@ def get_model_route(model_id: str) -> str:
     if "gemma-4-31b"         in low: return "ceo"
     if "qwen3-coder"         in low: return "cto"
     if "deepseek-r1-distill" in low: return "cfo"
-    if "gemma-4-26b"         in low: return "cpo"
-    if "qwen2.5-coder"       in low: return "coo"
+    if "qwen3.6-35b"         in low: return "cpo"
+    if "devstral"            in low: return "coo"
     if "vl-7b"               in low: return "vision"
     if "swarm"               in low: return "full_board"
     return "direct"
@@ -1087,6 +1103,18 @@ _EXECUTIVES = [
 # ══════════════════════════════════════════════════════════════════
 
 def gen_full_board(user_message: str, requested_model: str):
+    console.print()
+    console.print(
+        f"[bold cyan]  🏛 Executive Swarm — {cfg.preset_name.upper()} "
+        f"— {len(_EXECUTIVES)} agents in sequence:[/bold cyan]"
+    )
+    for _ex in _EXECUTIVES:
+        _mid = getattr(cfg, _ex["cfg_model"])
+        console.print(
+            f"[dim]     {_ex['emoji']} {_ex['role']:<4}  →  {_mid}[/dim]"
+        )
+    console.print()
+
     yield make_chunk("## 🏛️ Executive Board Meeting\n\n")
     yield make_chunk(f"**Topic:** {user_message}\n\n")
     yield make_chunk(
@@ -1210,6 +1238,7 @@ def gen_full_board(user_message: str, requested_model: str):
 
 
 def gen_ceo(user_message: str, requested_model: str):
+    console.print(f"[bold cyan]  📋 Assistant → 👑 CEO  [[{cfg.ceo_model}]][/bold cyan]")
     model = ensure_model_loaded(cfg.ceo_model)
     yield from stream_agent(
         model, "CEO", user_message,
@@ -1219,6 +1248,7 @@ def gen_ceo(user_message: str, requested_model: str):
 
 
 def gen_cto(user_message: str, requested_model: str):
+    console.print(f"[bold cyan]  📋 Assistant → ⚙️  CTO  [[{cfg.cto_model}]][/bold cyan]")
     model = ensure_model_loaded(cfg.cto_model)
     yield from stream_agent(
         model, "CTO", user_message,
@@ -1229,6 +1259,7 @@ def gen_cto(user_message: str, requested_model: str):
 
 
 def gen_cfo(user_message: str, requested_model: str):
+    console.print(f"[bold cyan]  📋 Assistant → 📊 CFO  [[{cfg.cfo_model}]][/bold cyan]")
     model = ensure_model_loaded(cfg.cfo_model)
     yield from stream_agent(
         model, "CFO", user_message,
@@ -1239,6 +1270,7 @@ def gen_cfo(user_message: str, requested_model: str):
 
 
 def gen_cpo(user_message: str, requested_model: str):
+    console.print(f"[bold cyan]  📋 Assistant → 🎯 CPO  [[{cfg.cpo_model}]][/bold cyan]")
     model = ensure_model_loaded(cfg.cpo_model)
     yield from stream_agent(
         model, "CPO", user_message,
@@ -1249,6 +1281,7 @@ def gen_cpo(user_message: str, requested_model: str):
 
 
 def gen_coo(user_message: str, requested_model: str):
+    console.print(f"[bold cyan]  📋 Assistant → 📋 COO  [[{cfg.coo_model}]][/bold cyan]")
     model = ensure_model_loaded(cfg.coo_model)
     yield from stream_agent(
         model, "COO", user_message,
@@ -1259,6 +1292,7 @@ def gen_coo(user_message: str, requested_model: str):
 
 
 def gen_vision(user_message: str, requested_model: str):
+    console.print(f"[bold cyan]  📋 Assistant → 👁️  Vision [[{cfg.vision_model}]][/bold cyan]")
     model = ensure_model_loaded(cfg.vision_model)
     yield make_chunk("## 👁️ Vision Analysis\n\n")
     yield from stream_agent(
@@ -1730,7 +1764,8 @@ def passthrough_tool_call(
 
     actual_model = cfg.ceo_model
     console.print(
-        f"[cyan]  🔧 Tool call passthrough → {actual_model} "
+        f"[cyan]  🔧 Tool call passthrough → "
+        f"CEO [[{actual_model}]] "
         f"({len(tools)} tool(s))[/cyan]"
     )
 
@@ -1857,6 +1892,26 @@ def openai_chat():
     console.print(
         f"[bold cyan]  → Model:[/bold cyan] {requested_model}"
     )
+    _route = get_model_route(requested_model)
+    if _route == "full_board":
+        console.print(
+            "[dim]  → Route:  Executive Swarm "
+            "— CEO · CTO · CFO · CPO · COO[/dim]"
+        )
+    elif _route in ("ceo", "cto", "cfo", "cpo", "coo"):
+        console.print(
+            f"[dim]  → Route:  {_route.upper()} "
+            f"[[{get_actual_model(requested_model)}]][/dim]"
+        )
+    elif _route == "vision":
+        console.print(
+            f"[dim]  → Route:  Vision "
+            f"[[{get_actual_model(requested_model)}]][/dim]"
+        )
+    else:
+        console.print(
+            f"[dim]  → Route:  Direct → {get_actual_model(requested_model)}[/dim]"
+        )
     console.print(
         f"[bold cyan]  → Task:[/bold cyan]  "
         f"{user_message[:120]}"
@@ -1864,6 +1919,9 @@ def openai_chat():
     )
     console.print(
         f"[dim]  → Time:  {time.strftime('%H:%M:%S')}[/dim]"
+    )
+    console.print(
+        "[yellow]  ⟳ Prefilling context — may take a moment for large inputs...[/yellow]"
     )
     console.print()
 
@@ -1878,22 +1936,25 @@ def openai_chat():
 @app.route("/v1/models", methods=["GET"])
 def openai_list_models():
     now = int(time.time())
-    models = [
-        {
-            "id":             m["id"],
-            "object":         "model",
-            "created":        now,
-            "owned_by":       "ai-executive-team",
-            "name":           m.get("name", m["id"]),
-            "description":    m.get("description", ""),
-            "context_length": m.get("context_length", 8192),
-            "capabilities":   {
+    models = []
+    for m in BRIDGE_MODEL_LIST:
+        ctx = m.get("context_length", 8192)
+        models.append({
+            "id":                   m["id"],
+            "object":               "model",
+            "created":              now,
+            "owned_by":             "ai-executive-team",
+            "name":                 m.get("name", m["id"]),
+            "description":          m.get("description", ""),
+            "context_length":       ctx,
+            "context_window":       ctx,
+            "max_tokens":           ctx,
+            "max_context_length":   ctx,
+            "capabilities":         {
                 cap: True
                 for cap in m.get("capabilities", ["chat"])
             },
-        }
-        for m in BRIDGE_MODEL_LIST
-    ]
+        })
     return jsonify({"object": "list", "data": models})
 
 
@@ -1903,14 +1964,18 @@ def openai_get_model(model_id: str):
     m   = _MODEL_MAP.get(
         model_id, {"id": model_id, "name": model_id}
     )
+    ctx = m.get("context_length", 8192)
     return jsonify({
-        "id":             m["id"],
-        "object":         "model",
-        "created":        now,
-        "owned_by":       "ai-executive-team",
-        "name":           m.get("name", m["id"]),
-        "description":    m.get("description", ""),
-        "context_length": m.get("context_length", 8192),
+        "id":                   m["id"],
+        "object":               "model",
+        "created":              now,
+        "owned_by":             "ai-executive-team",
+        "name":                 m.get("name", m["id"]),
+        "description":          m.get("description", ""),
+        "context_length":       ctx,
+        "context_window":       ctx,
+        "max_tokens":           ctx,
+        "max_context_length":   ctx,
     })
 
 
@@ -2133,6 +2198,26 @@ def ollama_chat():
     console.print(
         f"[bold cyan]  → Model:[/bold cyan] {requested_model}"
     )
+    _route = get_model_route(requested_model)
+    if _route == "full_board":
+        console.print(
+            "[dim]  → Route:  Executive Swarm "
+            "— CEO · CTO · CFO · CPO · COO[/dim]"
+        )
+    elif _route in ("ceo", "cto", "cfo", "cpo", "coo"):
+        console.print(
+            f"[dim]  → Route:  {_route.upper()} "
+            f"[[{get_actual_model(requested_model)}]][/dim]"
+        )
+    elif _route == "vision":
+        console.print(
+            f"[dim]  → Route:  Vision "
+            f"[[{get_actual_model(requested_model)}]][/dim]"
+        )
+    else:
+        console.print(
+            f"[dim]  → Route:  Direct → {get_actual_model(requested_model)}[/dim]"
+        )
     console.print(
         f"[bold cyan]  → Task:[/bold cyan]  "
         f"{user_message[:120]}"
@@ -2140,6 +2225,9 @@ def ollama_chat():
     )
     console.print(
         f"[dim]  → Time:  {time.strftime('%H:%M:%S')}[/dim]"
+    )
+    console.print(
+        "[yellow]  ⟳ Prefilling context — may take a moment for large inputs...[/yellow]"
     )
     console.print()
 
