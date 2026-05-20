@@ -70,6 +70,20 @@ HOST = cfg.bridge_host
 # Global request counter
 _request_counter = 0
 
+# Learned settings file — written by load_model.py tuner
+_LEARNED_SETTINGS_FILE = Path("learned_settings.json")
+
+
+def _read_learned_settings() -> dict:
+    """Read tuner results without importing load_model (avoids heavy init)."""
+    try:
+        if _LEARNED_SETTINGS_FILE.exists():
+            with open(_LEARNED_SETTINGS_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
 
 # ══════════════════════════════════════════════════════════════════
 # RESPONSE CACHE
@@ -1583,6 +1597,10 @@ def run_preflight_and_respond(
                     _set_cached(route, user_message, "".join(full_parts))
                 console.print("[green]  ✓ Stream complete[/green]")
                 _print_waiting()
+            except GeneratorExit:
+                signal_abort()
+                _print_waiting()
+                return
             except Exception as e:
                 console.print(f"[red]  ✗ Stream error: {e}[/red]")
                 yield make_chunk(f"\n\n[ERROR] {e}")
@@ -1625,56 +1643,65 @@ def run_preflight_and_respond(
         created_at   = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         cache_parts: list[str] = []
 
-        for w in warning_chunks:
+        try:
+            for w in warning_chunks:
+                yield json.dumps({
+                    "model":      actual_model,
+                    "created_at": created_at,
+                    "message":    {"role": "assistant", "content": w},
+                    "done":       False,
+                }) + "\n"
+
+            for chunk in generator_fn(user_message, actual_model):
+                if chunk.startswith(": keepalive"):
+                    continue
+                if chunk.startswith("data: ") and "[DONE]" not in chunk:
+                    try:
+                        payload = json.loads(chunk[6:])
+                        content = (
+                            payload
+                            .get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        if content:
+                            if _is_cacheable(route, user_message):
+                                cache_parts.append(content)
+                            yield json.dumps({
+                                "model":      actual_model,
+                                "created_at": created_at,
+                                "message":    {"role": "assistant", "content": content},
+                                "done":       False,
+                            }) + "\n"
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        pass
+
+            if cache_parts:
+                _set_cached(route, user_message, "".join(cache_parts))
+
             yield json.dumps({
-                "model":      actual_model,
-                "created_at": created_at,
-                "message":    {"role": "assistant", "content": w},
-                "done":       False,
+                "model":             actual_model,
+                "created_at":        created_at,
+                "message":           {"role": "assistant", "content": ""},
+                "done":              True,
+                "done_reason":       "stop",
+                "total_duration":    0,
+                "load_duration":     0,
+                "prompt_eval_count": 0,
+                "eval_count":        0,
+                "eval_duration":     0,
             }) + "\n"
 
-        for chunk in generator_fn(user_message, actual_model):
-            if chunk.startswith(": keepalive"):
-                continue
-            if chunk.startswith("data: ") and "[DONE]" not in chunk:
-                try:
-                    payload = json.loads(chunk[6:])
-                    content = (
-                        payload
-                        .get("choices", [{}])[0]
-                        .get("delta", {})
-                        .get("content", "")
-                    )
-                    if content:
-                        if _is_cacheable(route, user_message):
-                            cache_parts.append(content)
-                        yield json.dumps({
-                            "model":      actual_model,
-                            "created_at": created_at,
-                            "message":    {"role": "assistant", "content": content},
-                            "done":       False,
-                        }) + "\n"
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    pass
+            console.print("[green]  ✓ Ollama stream complete[/green]")
+            _print_waiting()
 
-        if cache_parts:
-            _set_cached(route, user_message, "".join(cache_parts))
-
-        yield json.dumps({
-            "model":             actual_model,
-            "created_at":        created_at,
-            "message":           {"role": "assistant", "content": ""},
-            "done":              True,
-            "done_reason":       "stop",
-            "total_duration":    0,
-            "load_duration":     0,
-            "prompt_eval_count": 0,
-            "eval_count":        0,
-            "eval_duration":     0,
-        }) + "\n"
-
-        console.print("[green]  ✓ Ollama stream complete[/green]")
-        _print_waiting()
+        except GeneratorExit:
+            signal_abort()
+            _print_waiting()
+            return
+        except Exception as e:
+            console.print(f"[red]  ✗ Ollama stream error: {e}[/red]")
+            _print_waiting()
 
     return Response(
         stream_with_context(ollama_stream()),
@@ -1891,7 +1918,7 @@ def openai_get_model(model_id: str):
 # OLLAMA ENDPOINTS
 # ══════════════════════════════════════════════════════════════════
 
-def model_to_ollama(m: dict) -> dict:
+def model_to_ollama(m: dict, learned: dict | None = None) -> dict:
     short_name = MODEL_NAME_MAP_REVERSE.get(m["id"], m["id"])
     meta = _OLLAMA_META.get(short_name, {
         "family":         "llama",
@@ -1899,6 +1926,8 @@ def model_to_ollama(m: dict) -> dict:
         "size":           8000000000,
         "parameter_size": m.get("size_label", "unknown"),
     })
+    tuned       = (learned or {}).get(m["id"], {})
+    quant_label = (tuned.get("k_cache") or "f16").upper()
     return {
         "name":        short_name,
         "model":       short_name,
@@ -1911,7 +1940,7 @@ def model_to_ollama(m: dict) -> dict:
             "family":             meta["family"],
             "families":           meta["families"],
             "parameter_size":     meta["parameter_size"],
-            "quantization_level": "Q4_K_M",
+            "quantization_level": quant_label,
         },
     }
 
@@ -1927,7 +1956,8 @@ def _ollama_chat_model_list():
         m for m in BRIDGE_MODEL_LIST
         if "embeddings" not in m.get("capabilities", [])
     ]
-    return jsonify({"models": [model_to_ollama(m) for m in chat_models]})
+    learned = _read_learned_settings()
+    return jsonify({"models": [model_to_ollama(m, learned) for m in chat_models]})
 
 
 @app.route("/api/tags", methods=["GET"])
@@ -2014,12 +2044,18 @@ def ollama_show():
         "parameter_size": m.get("size_label", "unknown"),
     })
 
+    learned     = _read_learned_settings()
+    tuned       = learned.get(real_id, {})
+    actual_ctx  = tuned.get("context", 8192)
+    actual_k    = tuned.get("k_cache", "f16")
+    quant_label = actual_k.upper() if actual_k else "F16"
+
     return jsonify({
         "modelfile": (
             f"# {m.get('name', model_id)}\n"
             f"# {m.get('description', '')}"
         ),
-        "parameters": "temperature 0.7\nnum_ctx 8192",
+        "parameters": f"temperature 0.7\nnum_ctx {actual_ctx}",
         "template":   "{{ .System }}\n\n{{ .Prompt }}",
         "details": {
             "parent_model":       "",
@@ -2027,12 +2063,13 @@ def ollama_show():
             "family":             meta["family"],
             "families":           meta["families"],
             "parameter_size":     meta["parameter_size"],
-            "quantization_level": "Q4_K_M",
+            "quantization_level": quant_label,
         },
         "model_info": {
             "general.architecture":    meta["family"],
             "general.parameter_count": meta.get("size", 0),
             "general.name":            m.get("name", model_id),
+            "llm.context_length":      actual_ctx,
         },
     })
 
@@ -2161,9 +2198,32 @@ def health():
     loaded_status = (
         get_loaded_model_status() if lm_up else {}
     )
+    learned       = _read_learned_settings()
+
+    board_models = {
+        "ceo": cfg.ceo_model,
+        "cto": cfg.cto_model,
+        "cfo": cfg.cfo_model,
+        "cpo": cfg.cpo_model,
+        "coo": cfg.coo_model,
+    }
+    tuner_state = {}
+    for role, model_id in board_models.items():
+        entry = learned.get(model_id, {})
+        if entry:
+            tuner_state[role] = {
+                "model":    model_id,
+                "context":  entry.get("context"),
+                "k_cache":  entry.get("k_cache"),
+                "v_cache":  entry.get("v_cache"),
+                "fa":       entry.get("flash_attn"),
+                "used":     entry.get("success_count", 0),
+                "verified": bool(entry.get("applied_config")),
+            }
+
     return jsonify({
         "bridge":  "running",
-        "version": "2.0.3",
+        "version": "2.1.0",
         "preset":  cfg.preset_name,
         "requests_served": _request_counter,
         "lm_studio": {
@@ -2172,17 +2232,12 @@ def health():
             "model_count":      len(lm_models),
             "currently_loaded": loaded_status,
         },
-        "board": {
-            "ceo": cfg.ceo_model,
-            "cto": cfg.cto_model,
-            "cfo": cfg.cfo_model,
-            "cpo": cfg.cpo_model,
-            "coo": cfg.coo_model,
-        },
+        "board":   board_models,
         "utility": {
             "vision":   cfg.vision_model,
             "fallback": cfg.fallback_model,
         },
+        "tuner":          tuner_state,
         "bridge_models":  len(BRIDGE_MODEL_LIST),
         "timeout_secs":   FIRST_TOKEN_TIMEOUT,
         "model_timeouts": MODEL_TIMEOUTS,
@@ -2836,9 +2891,13 @@ def run_preset_switcher():
         learned_settings.json so the O key uses it from now on.
 
         What gets tuned:
-          • Context window size  (2048 / 4096 / 8192 / 16384)
-          • KV cache quantization  (q8_0 / f16)
-          • Flash Attention  (on / off — only for models that support it)
+          • Context window size  (2048 / 4096 / 8192 / 16384 / 32768)
+          • KV cache quantization  (q8_0 / q4_0 / f16)
+          • Flash Attention  (on / off — benchmark decides, failures saved)
+
+        FAST mode (default): 4 configs, ~15 min hybrid / ~5 min GPU-only.
+        SLOW mode (press S): 10 configs, ~45 min hybrid / ~12 min GPU-only.
+          Full cross-product of ctx × FA × k/v cache quant.
 
         Each config: unload → write config → load → benchmark → record.
         Winner = highest tok/s.  Saved → loaded → done.
@@ -2948,48 +3007,132 @@ def run_preset_switcher():
 
         model_id = _pick[0]
 
+        # ── Fast or Slow tune? ────────────────────────────────────
+        console.print(
+            "\n[bold yellow]  ════════════════════════════════════"
+            "════════════════[/bold yellow]"
+        )
+        console.print("[bold yellow]  🔬 TUNE DEPTH[/bold yellow]")
+        console.print(
+            "[bold yellow]  ════════════════════════════════════"
+            "════════════════[/bold yellow]"
+        )
+        console.print(
+            "[cyan]  [F] FAST  — 4 configs   (~15 min hybrid / ~5 min GPU)[/cyan]"
+        )
+        console.print(
+            "[dim]      FA on/off × 2-3 context sizes — quick sanity check[/dim]"
+        )
+        console.print(
+            "[cyan]  [S] SLOW  — 10 configs  (~45 min hybrid / ~12 min GPU)[/cyan]"
+        )
+        console.print(
+            "[dim]      Full grid: ctx × FA × k/v cache quant — thorough search[/dim]"
+        )
+        console.print("[dim]  Press F/S or wait 5s for FAST...[/dim]\n")
+
+        _tune_fast    = [True]
+        _speed_done   = [False]
+
+        def _speed_countdown():
+            for _r in range(5, 0, -1):
+                if _speed_done[0]:
+                    return
+                sys.stderr.write(f"\r  Depth: FAST  ({_r}s)  ")
+                sys.stderr.flush()
+                time.sleep(1)
+            _speed_done[0] = True
+
+        _spt = threading.Thread(target=_speed_countdown, daemon=True)
+        _spt.start()
+
+        while not _speed_done[0]:
+            if msvcrt.kbhit():
+                _sk  = msvcrt.getwch()
+                _ski = _sk if isinstance(_sk, str) else _sk.decode("ascii", errors="ignore")
+                if _ski in ("s", "S"):
+                    _tune_fast[0]  = False
+                    _speed_done[0] = True
+                    sys.stderr.write(
+                        "\r  ✓ SLOW tune selected                    \n"
+                    )
+                    sys.stderr.flush()
+                    break
+                elif _ski in ("f", "F", "\r", "\n"):
+                    _speed_done[0] = True
+                    sys.stderr.write(
+                        "\r  ✓ FAST tune selected                    \n"
+                    )
+                    sys.stderr.flush()
+                    break
+            time.sleep(0.05)
+
+        _spt.join(timeout=7)
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+        is_fast_tune = _tune_fast[0]
+
         info    = _get_info(model_id)
         gpu_fit = info.get("gpu_fit", True)
         size_gb = info.get("size_gb", 8.0)
         name    = info.get("name", model_id)
 
         # ── Build test matrix ─────────────────────────────────────
-        # Kept short deliberately — each cycle = full unload+load+bench.
-        # GPU-fit (< 10 GB): can test flash attention and bigger context.
-        # Hybrid (> 12 GB):  no flash attention, conservative context.
-        is_gemma4 = "gemma-4" in model_id.lower()
+        # FAST: 4 configs — FA on/off × 2-3 context sizes.
+        # SLOW: 10 configs — full cross-product of ctx × FA × cache quant.
+        #
+        # FA=on configs that are incompatible with the hardware/model will
+        # fail the readiness probe and be saved to failed_configs so they're
+        # permanently skipped on future tune runs.  Let the benchmark decide
+        # rather than hard-coding FA=off everywhere.
+        #
+        # GPU-fit  (< 10 GB): all layers on GPU — can push higher context.
+        # Hybrid   (≥ 10 GB): layers split GPU+RAM — conservative on context.
 
-        if is_gemma4:
-            # Test FA=on variants too — llama.cpp may silently disable FA if
-            # the model's variable-size V embeddings are incompatible, in which
-            # case those configs will just score similarly to their FA=off peers
-            # and lose.  Let the benchmark decide instead of hard-coding off.
-            test_matrix = [
-                {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
-                {"context": 4096,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "4K  q8/q8  FA=on"},
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8  FA=on"},
-                {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "2K  q8/f16 FA=off"},
-                {"context": 16384, "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q8/f16 FA=off (ambitious)"},
-            ]
-        elif gpu_fit and size_gb < 10:
-            test_matrix = [
-                {"context": 16384, "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "16K q8/q8 FA=on"},
-                {"context": 16384, "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q8/f16 FA=off"},
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8 FA=on"},
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
-                {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
-            ]
+        if is_fast_tune:
+            if gpu_fit and size_gb < 10:
+                test_matrix = [
+                    {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8  FA=on"},
+                    {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
+                    {"context": 16384, "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "16K q8/q8  FA=on"},
+                    {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
+                ]
+            else:
+                # Hybrid fast — FA on/off at baseline + next step up
+                test_matrix = [
+                    {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
+                    {"context": 4096,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "4K  q8/q8  FA=on"},
+                    {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
+                    {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "2K  q8/f16 FA=off"},
+                ]
         else:
-            # Large hybrid — test FA=on variants too
-            test_matrix = [
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
-                {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8  FA=on"},
-                {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
-                {"context": 4096,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "4K  q8/q8  FA=on"},
-                {"context": 16384, "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q8/f16 FA=off (ambitious)"},
-                {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "2K  q8/f16 FA=off (minimal)"},
-            ]
+            # SLOW — full cross-product: ctx × FA × k/v cache quant
+            if gpu_fit and size_gb < 10:
+                test_matrix = [
+                    {"context": 16384, "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "16K q8/q8  FA=on"},
+                    {"context": 16384, "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q8/f16 FA=off"},
+                    {"context": 16384, "k_cache": "q4_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q4/f16 FA=off"},
+                    {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8  FA=on"},
+                    {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
+                    {"context": 8192,  "k_cache": "q4_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q4/f16 FA=off"},
+                    {"context": 4096,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "4K  q8/q8  FA=on"},
+                    {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
+                    {"context": 32768, "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "32K q8/q8  FA=on (ambitious)"},
+                ]
+            else:
+                # Hybrid slow — conservative on ctx, thorough on FA + cache
+                test_matrix = [
+                    {"context": 2048,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "2K  q8/f16 FA=off"},
+                    {"context": 2048,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "2K  q8/q8  FA=on"},
+                    {"context": 4096,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q8/f16 FA=off"},
+                    {"context": 4096,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "4K  q8/q8  FA=on"},
+                    {"context": 4096,  "k_cache": "q4_0", "v_cache": "f16",  "flash_attn": False, "label": "4K  q4/f16 FA=off"},
+                    {"context": 8192,  "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q8/f16 FA=off"},
+                    {"context": 8192,  "k_cache": "q8_0", "v_cache": "q8_0", "flash_attn": True,  "label": "8K  q8/q8  FA=on"},
+                    {"context": 8192,  "k_cache": "q4_0", "v_cache": "f16",  "flash_attn": False, "label": "8K  q4/f16 FA=off"},
+                    {"context": 16384, "k_cache": "q8_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q8/f16 FA=off"},
+                    {"context": 16384, "k_cache": "q4_0", "v_cache": "f16",  "flash_attn": False, "label": "16K q4/f16 FA=off"},
+                ]
 
         # ── Benchmark prompt — same every time for fair comparison ─
         BENCH_PROMPT = "List every prime number between 1 and 50, one per line."
@@ -3016,6 +3159,9 @@ def run_preset_switcher():
             "══════════════════[/bold yellow]"
         )
         console.print(f"[cyan]  Model    : {name}[/cyan]")
+        console.print(
+            f"[cyan]  Depth    : {'FAST' if is_fast_tune else 'SLOW'}[/cyan]"
+        )
         console.print(
             f"[cyan]  GPU fit  : "
             f"{'Yes ✅' if gpu_fit else 'Hybrid ⚠️'}  "
