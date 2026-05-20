@@ -1023,6 +1023,131 @@ def get_learned_setting(model_id: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
+# FAILED CONFIG TRACKING
+# Remember which (context, k_cache, v_cache, flash_attn) combos failed
+# so the tuner doesn't waste time retrying configs that are already
+# known to be unviable on this hardware.
+# ══════════════════════════════════════════════════════════════════
+
+def _cfg_match(a: dict, ctx: int, k: str, v: str, fa: bool) -> bool:
+    return (
+        a.get("context")    == ctx and
+        a.get("k_cache")    == k and
+        a.get("v_cache")    == v and
+        bool(a.get("flash_attn")) == bool(fa)
+    )
+
+
+def _config_is_proven_working(entry: dict, ctx: int, k: str, v: str, fa: bool) -> bool:
+    """Returns True if this exact config matches the model's currently-saved
+    proven-working settings AND has succeeded at least once."""
+    if not _cfg_match(entry, ctx, k, v, fa):
+        return False
+    # Proven if it has a success_count >= 1 OR has been used previously
+    return int(entry.get("success_count", 0)) >= 1
+
+
+def is_known_failed(
+    model_id: str, ctx: int, k: str, v: str, fa: bool
+) -> dict | None:
+    """Returns the failure record if this exact config has failed before, else None.
+
+    GUARD: if the config matches the currently-saved proven-working settings,
+    we never treat it as failed — protects against stale/bad failure entries
+    overriding what we know works.
+    """
+    entry = load_learned_settings().get(model_id, {})
+
+    # The model's currently-working config can never be "failed."
+    if _config_is_proven_working(entry, ctx, k, v, fa):
+        return None
+
+    for f in entry.get("failed_configs", []):
+        if _cfg_match(f, ctx, k, v, fa):
+            return f
+    return None
+
+
+def save_failed_config(
+    model_id: str, ctx: int, k: str, v: str, fa: bool, reason: str
+) -> None:
+    """Append/update a failed config record in learned_settings.json.
+
+    GUARD: never mark the proven-working config as failed. If the (ctx, k, v, fa)
+    we're being asked to save matches the model's current learned settings AND
+    that config has succeeded before, refuse — almost certainly a measurement
+    artifact (streaming parser hiccup, transient timeout) and saving it would
+    cause the next tune run to skip the only working config.
+    """
+    try:
+        settings = load_learned_settings()
+        entry    = settings.setdefault(model_id, {})
+
+        if _config_is_proven_working(entry, ctx, k, v, fa):
+            log_warn(
+                f"Refusing to mark proven-working config as failed for "
+                f"{model_id}: ctx={ctx} K={k} V={v} FA={fa} "
+                f"(used {entry.get('success_count', 0)}x). Reason was: {reason}"
+            )
+            # Also opportunistically clean up any stale failed entry for the
+            # working config that may have been saved before this guard existed
+            failed = entry.get("failed_configs", [])
+            new_failed = [f for f in failed if not _cfg_match(f, ctx, k, v, fa)]
+            if len(new_failed) != len(failed):
+                entry["failed_configs"] = new_failed
+                LEARNED_SETTINGS_FILE.write_text(
+                    json.dumps(settings, indent=2), encoding="utf-8"
+                )
+                log_info(
+                    f"Cleaned {len(failed) - len(new_failed)} stale failed entry "
+                    f"matching proven-working config for {model_id}"
+                )
+            return
+
+        failed   = entry.setdefault("failed_configs", [])
+        now_str  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        for f in failed:
+            if _cfg_match(f, ctx, k, v, fa):
+                f["reason"]     = reason
+                f["last_tried"] = now_str
+                f["fail_count"] = int(f.get("fail_count", 1)) + 1
+                break
+        else:
+            failed.append({
+                "context":    ctx,
+                "k_cache":    k,
+                "v_cache":    v,
+                "flash_attn": fa,
+                "reason":     reason,
+                "last_tried": now_str,
+                "fail_count": 1,
+            })
+
+        LEARNED_SETTINGS_FILE.write_text(
+            json.dumps(settings, indent=2), encoding="utf-8"
+        )
+    except Exception as e:
+        log_warn(f"Could not save failed config: {e}")
+
+
+def clear_failed_configs(model_id: str) -> int:
+    """Manually clear the failed list for a model. Returns count removed."""
+    try:
+        settings = load_learned_settings()
+        entry    = settings.get(model_id, {})
+        n = len(entry.get("failed_configs", []))
+        if n and "failed_configs" in entry:
+            entry["failed_configs"] = []
+            LEARNED_SETTINGS_FILE.write_text(
+                json.dumps(settings, indent=2), encoding="utf-8"
+            )
+        return n
+    except Exception:
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════
 # ATTEMPT LADDER
 # Builds the ordered list of settings to try.
 # Adapts based on whether config path is confirmed or not.
@@ -1407,15 +1532,17 @@ def run_load_attempt(
     lm_id: str,
     attempt: dict,
     info: dict,
+    known_paths: list | None = None,
 ) -> dict:
     """
     One complete load attempt:
         1. Optionally unload (clears cached config in LM Studio)
         2. Snapshot file mtimes (to detect which config LM Studio reads)
+           — SKIPPED if known_paths is non-empty (already discovered)
         3. Write config to all known locations
         4. POST /api/v1/models/load (keep alive through warmup)
         5. Poll /v1/models to detect when model appears
-        6. After success: find which config files changed
+        6. After success: find which config files changed (or reuse known_paths)
         7. Return result
     """
     result     = {
@@ -1426,6 +1553,7 @@ def run_load_attempt(
         "warmup_detected_at": 0,
     }
     stop_event = threading.Event()
+    skip_discovery = bool(known_paths)
 
     # Step 1: Unload if strategy requires it
     if attempt.get("unload_first"):
@@ -1435,8 +1563,10 @@ def run_load_attempt(
         unload_model(lm_id)
         time.sleep(2)
 
-    # Step 2: Snapshot mtimes before load
-    before_mtimes = get_all_json_mtimes()
+    # Step 2: Snapshot mtimes before load — only if we don't already know the paths.
+    # Scanning .lmstudio (258+ JSON files) every load is wasteful once we've
+    # confirmed which files LM Studio actually reads for this model.
+    before_mtimes = {} if skip_discovery else get_all_json_mtimes()
 
     # Step 3: Write config
     write_count, written_paths = write_config_everywhere(
@@ -1539,18 +1669,26 @@ def run_load_attempt(
 
     # Step 6: Discover which config files LM Studio actually touched
     if result["status"] == "ok":
-        changed = find_changed_json_files(before_mtimes)
-        if changed:
-            log_success(
-                f"Config files LM Studio used during load",
-                {"files": [str(p) for p in changed]}
-            )
+        if skip_discovery:
+            # Already known from a prior load — no need to rescan .lmstudio
+            result["confirmed_config_paths"] = known_paths
             console.print(
-                f"[dim]  🔍 Discovered {len(changed)} real config path(s)[/dim]"
+                f"[dim]  Using {len(known_paths)} known config path(s) "
+                f"(no rediscovery needed)[/dim]"
             )
-            result["confirmed_config_paths"] = changed
         else:
-            result["confirmed_config_paths"] = []
+            changed = find_changed_json_files(before_mtimes)
+            if changed:
+                log_success(
+                    f"Config files LM Studio used during load",
+                    {"files": [str(p) for p in changed]}
+                )
+                console.print(
+                    f"[dim]  🔍 Discovered {len(changed)} real config path(s)[/dim]"
+                )
+                result["confirmed_config_paths"] = changed
+            else:
+                result["confirmed_config_paths"] = []
 
     log_info(
         f"Attempt {attempt['attempt']}: "
@@ -1987,14 +2125,16 @@ def wait_for_model(model_id: str) -> bool:
     ladder  = build_attempt_ladder(model_id, learned)
     success = False
 
-    confirmed_count = len(get_confirmed_config_paths(model_id))
+    confirmed_paths = get_confirmed_config_paths(model_id)
+    confirmed_count = len(confirmed_paths)
     console.print(
         f"[bold cyan]Smart Loader:[/bold cyan] "
         f"{len(ladder)} combinations — fully automatic"
     )
     if confirmed_count:
         console.print(
-            f"[dim]  Config path confirmed from previous load[/dim]"
+            f"[dim]  Config path confirmed from previous load — "
+            f"skipping rediscovery[/dim]"
         )
     console.print(f"[dim]  Log: {LOG_FILE}[/dim]\n")
 
@@ -2022,7 +2162,10 @@ def wait_for_model(model_id: str) -> bool:
         if note:
             console.print(f"[dim]  ℹ {note}[/dim]")
 
-        result  = run_load_attempt(lm_studio_id, attempt, info)
+        result  = run_load_attempt(
+            lm_studio_id, attempt, info,
+            known_paths=confirmed_paths,
+        )
         elapsed = result["elapsed"]
 
         if result["status"] == "ok":

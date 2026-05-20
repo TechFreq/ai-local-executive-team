@@ -2855,6 +2855,9 @@ def run_preset_switcher():
             save_learned_setting,
             run_load_attempt,
             LM_STUDIO_BASE              as _LMS_BASE,
+            is_known_failed,
+            save_failed_config,
+            get_confirmed_config_paths,
         )
 
         # ── Which model to tune? — let user pick ─────────────────
@@ -3102,6 +3105,33 @@ def run_preset_switcher():
                 f"[bold]  [{i + 1}/{len(test_matrix)}] {label}[/bold]"
             )
 
+            # Step 0: Skip configs that previously failed on this hardware.
+            # Saves ~140s per known-bad config and avoids re-discovering pain.
+            _prev_fail = is_known_failed(
+                model_id, context, k_cache, v_cache, flash_attn
+            )
+            if _prev_fail:
+                _fc = _prev_fail.get("fail_count", 1)
+                _fr = _prev_fail.get("reason", "unknown")
+                _ft = _prev_fail.get("last_tried", "unknown")
+                console.print(
+                    f"[yellow]    Skipping — failed {_fc}x before "
+                    f"(last: {_ft})[/yellow]"
+                )
+                console.print(f"[dim]    Reason: {_fr}[/dim]")
+                console.print(
+                    "[dim]    To retry, clear failed_configs for this model "
+                    "in learned_settings.json[/dim]"
+                )
+                tune_results.append({
+                    "cfg":     cfg_entry,
+                    "tps":     0.0,
+                    "ok":      False,
+                    "skipped": True,
+                    "reason":  f"previously failed {_fc}x: {_fr}",
+                })
+                continue
+
             # Step 1: Unload
             console.print("[dim]    → Unloading...[/dim]")
             try:
@@ -3142,7 +3172,7 @@ def run_preset_switcher():
                     f"[yellow]    RAM at {_ram_pct:.0f}% — loading may be slow[/yellow]"
                 )
 
-            # Step 3: Load
+            # Step 3: Load — pass known config paths so we skip rediscovery
             attempt = {
                 "attempt":     i + 1,
                 "context":     context,
@@ -3152,10 +3182,18 @@ def run_preset_switcher():
                 "label":       label,
                 "unload_first": False,   # already unloaded above
             }
+            _known_paths = get_confirmed_config_paths(model_id)
             try:
-                load_result = run_load_attempt(lm_id, attempt, info)
+                load_result = run_load_attempt(
+                    lm_id, attempt, info,
+                    known_paths=_known_paths,
+                )
             except Exception as e:
                 console.print(f"[red]    ✗ Load error: {e}[/red]")
+                save_failed_config(
+                    model_id, context, k_cache, v_cache, flash_attn,
+                    f"load error: {e}"[:120],
+                )
                 tune_results.append(
                     {"cfg": cfg_entry, "tps": 0.0, "ok": False,
                      "reason": str(e)}
@@ -3165,6 +3203,10 @@ def run_preset_switcher():
             if load_result.get("status") != "ok":
                 reason = load_result.get("message", "unknown")[:80]
                 console.print(f"[yellow]    ✗ Load failed: {reason}[/yellow]")
+                save_failed_config(
+                    model_id, context, k_cache, v_cache, flash_attn,
+                    f"load failed: {reason}",
+                )
                 tune_results.append(
                     {"cfg": cfg_entry, "tps": 0.0, "ok": False,
                      "reason": reason}
@@ -3173,39 +3215,96 @@ def run_preset_switcher():
 
             load_time = load_result.get("elapsed", 0)
 
-            # Step 4: Benchmark — streamed + threaded so we can show live phases.
-            # First inference at NEW settings is effectively load+benchmark:
-            # fresh KV-cache allocation at the new context size, prompt
-            # re-processing, GPU-layer rebalance. So even for a "loaded" model,
-            # the first request under new config takes much longer than steady state.
-            # GPU-fit models respond fast; hybrid/RAM models need a lot more headroom.
-            _BENCH_TIMEOUT = 45 if gpu_fit else 140
+            # Step 3.5: Readiness probe — tiny 1-token request to verify the
+            # model is *actually* responsive at this config before committing
+            # 140s to a real benchmark. If the model can't return 1 token in
+            # the probe budget, it's not viable at these settings on this
+            # hardware (RAM bottleneck on prompt processing, OOM, etc.).
+            _probe_budget = 30 if gpu_fit else 75
+            console.print(
+                f"[dim]    Probing readiness (1-token, budget {_probe_budget}s)...[/dim]"
+            )
+            _probe_start = time.time()
+            _probe_ok    = False
+            _probe_err   = None
+            try:
+                _pr = _req.post(
+                    f"{_LMS_BASE}/v1/chat/completions",
+                    json={
+                        "model":       lm_id,
+                        "messages":    [{"role": "user", "content": "hi"}],
+                        "max_tokens":  1,
+                        "temperature": 0,
+                        "stream":      False,
+                    },
+                    timeout=_probe_budget,
+                )
+                if _pr.status_code == 200:
+                    _probe_ok = True
+                else:
+                    _probe_err = f"HTTP {_pr.status_code}"
+            except Exception as _pex:
+                _probe_err = str(_pex)[:100]
 
-            # Visible post-load settle — LM Studio is still finishing KV-cache setup
-            # after the load POST returns 200. Show a countdown so the screen
-            # doesn't go silent.
+            _probe_secs = time.time() - _probe_start
+            if not _probe_ok:
+                _reason = (
+                    f"probe unresponsive after {_probe_secs:.0f}s "
+                    f"({_probe_err})"
+                )
+                console.print(
+                    f"[yellow]    ✗ Model didn't respond to probe: "
+                    f"{_probe_err}[/yellow]"
+                )
+                console.print(
+                    "[yellow]    Config not viable at this hardware — "
+                    "skipping full benchmark.[/yellow]"
+                )
+                save_failed_config(
+                    model_id, context, k_cache, v_cache, flash_attn, _reason
+                )
+                tune_results.append(
+                    {"cfg": cfg_entry, "tps": 0.0, "ok": False,
+                     "reason": _reason}
+                )
+                continue
+            console.print(
+                f"[green]    Probe OK in {_probe_secs:.1f}s — model is responsive[/green]"
+            )
+
+            # Step 4: Benchmark — NON-STREAMING, threaded with live elapsed time.
+            # We reverted from SSE streaming because the LM Studio stream format
+            # was producing "no tokens returned" false negatives (delta events
+            # without content fields, usage chunks parsed as no-ops, etc.) that
+            # caused us to mark the working config as failed. Non-streaming uses
+            # usage.completion_tokens which is reliable.
+            #
+            # The probe already gave us TTFT (time-to-first-token at this config),
+            # so we don't need streaming for that. The benchmark now measures
+            # steady-state generation speed only (model is already warm from probe).
+            _BENCH_TIMEOUT = 45 if gpu_fit else 120
+
+            # Visible settle countdown — KV cache + warmup finalize
             _settle = 2 if gpu_fit else 4
             console.print(
-                f"[dim]    Finalizing load (KV cache + warmup) — {_settle}s[/dim]"
+                f"[dim]    Finalizing post-probe (KV cache settle) — {_settle}s[/dim]"
             )
             for _s in range(_settle, 0, -1):
                 console.print(f"[dim]    ... finalizing {_s}s[/dim]")
                 time.sleep(1)
 
             console.print(
-                f"[dim]    Benchmark request sent — first token may take "
-                f"15-40s on RAM models (limit {_BENCH_TIMEOUT}s)[/dim]"
+                f"[dim]    Benchmark — generating {BENCH_TOKENS} tokens "
+                f"(limit {_BENCH_TIMEOUT}s)[/dim]"
             )
-            bench_start    = time.time()
-            _bench_status  = [None]   # HTTP status or None if exception
-            _bench_exc     = [None]
-            _bench_done    = threading.Event()
-            _bench_first   = [None]   # time.time() of first content token
-            _bench_count   = [0]      # tokens received so far
+            bench_start  = time.time()
+            _bench_resp  = [None]
+            _bench_exc   = [None]
+            _bench_done  = threading.Event()
 
             def _run_bench():
                 try:
-                    with _req.post(
+                    _bench_resp[0] = _req.post(
                         f"{_LMS_BASE}/v1/chat/completions",
                         json={
                             "model":       lm_id,
@@ -3215,34 +3314,10 @@ def run_preset_switcher():
                             ],
                             "max_tokens":  BENCH_TOKENS,
                             "temperature": 0,
-                            "stream":      True,
+                            "stream":      False,
                         },
-                        stream=True,
                         timeout=_BENCH_TIMEOUT,
-                    ) as r:
-                        _bench_status[0] = r.status_code
-                        if r.status_code != 200:
-                            return
-                        for raw in r.iter_lines():
-                            if not raw:
-                                continue
-                            line = raw.decode("utf-8", errors="ignore")
-                            if not line.startswith("data: "):
-                                continue
-                            payload = line[6:].strip()
-                            if payload == "[DONE]":
-                                break
-                            try:
-                                obj = json.loads(payload)
-                            except json.JSONDecodeError:
-                                continue
-                            choices = obj.get("choices") or [{}]
-                            delta = choices[0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                if _bench_first[0] is None:
-                                    _bench_first[0] = time.time()
-                                _bench_count[0] += 1
+                    )
                 except Exception as exc:
                     _bench_exc[0] = exc
                 finally:
@@ -3258,90 +3333,89 @@ def run_preset_switcher():
                     _pct   = min(99, int(_elapsed / _BENCH_TIMEOUT * 100))
                     _fill  = "=" * (_pct // 5)
                     _empty = "." * (20 - _pct // 5)
-
-                    # Phase label changes based on whether first token arrived
-                    if _bench_first[0] is None:
-                        _phase = (
-                            f"warming up — no tokens yet "
-                            f"(KV cache build, prompt processing)"
-                        )
-                    else:
-                        _ntok    = _bench_count[0]
-                        _gen_s   = max(time.time() - _bench_first[0], 0.1)
-                        _ttft    = _bench_first[0] - bench_start
-                        _live_tps = _ntok / _gen_s
-                        _phase = (
-                            f"generating {_ntok}/{BENCH_TOKENS} tokens "
-                            f"@ {_live_tps:.1f} tok/s "
-                            f"(first token took {_ttft:.1f}s)"
-                        )
                     console.print(
                         f"[dim]    |{_fill}{_empty}| {_elapsed}s / "
-                        f"{_BENCH_TIMEOUT}s — {_phase}[/dim]"
+                        f"{_BENCH_TIMEOUT}s — generating tokens...[/dim]"
                     )
                     _next_tick = _elapsed + 3
                 if _elapsed >= _BENCH_TIMEOUT:
                     break
             _bench_done.wait(timeout=5)
             bench_secs = time.time() - bench_start
-            status     = _bench_status[0]
-            _ex        = _bench_exc[0]
-            ntok       = _bench_count[0]
-            first_at   = _bench_first[0]
+            resp = _bench_resp[0]
+            _ex  = _bench_exc[0]
 
             if _ex is not None:
                 console.print(f"[red]    ✗ Benchmark error: {_ex}[/red]")
+                # Don't save as failed — transient errors shouldn't trash settings
                 tune_results.append(
                     {"cfg": cfg_entry, "tps": 0.0, "ok": False,
                      "reason": str(_ex)}
                 )
-            elif status is None:
+            elif resp is None:
+                _to_reason = f"benchmark timeout after {bench_secs:.0f}s"
                 console.print(
-                    f"[yellow]    ✗ Benchmark timed out after {bench_secs:.0f}s "
-                    f"({'no tokens yet' if first_at is None else f'{ntok} tokens before timeout'})[/yellow]"
+                    f"[yellow]    ✗ Benchmark timed out after {bench_secs:.0f}s[/yellow]"
+                )
+                save_failed_config(
+                    model_id, context, k_cache, v_cache, flash_attn, _to_reason
                 )
                 tune_results.append(
                     {"cfg": cfg_entry, "tps": 0.0, "ok": False,
-                     "reason": f"timeout after {bench_secs:.0f}s "
-                               f"({'warmup' if first_at is None else 'mid-generation'})"}
+                     "reason": _to_reason}
                 )
-            elif status == 200 and ntok > 0:
-                # End-to-end tok/s (includes first-token latency — real-world feel)
-                tps    = ntok / max(bench_secs, 0.1)
-                ttft_s = (first_at - bench_start) if first_at else 0.0
-                gen_s  = (bench_secs - ttft_s) if first_at else bench_secs
-                gen_tps = ntok / max(gen_s, 0.1)
-                console.print(
-                    f"[green]    OK {ntok} tokens — "
-                    f"first token {ttft_s:.1f}s, "
-                    f"generation {gen_tps:.1f} tok/s, "
-                    f"end-to-end [bold]{tps:.1f} tok/s[/bold][/green]"
-                )
-                tune_results.append({
-                    "cfg":        cfg_entry,
-                    "tps":        tps,
-                    "gen_tps":    gen_tps,
-                    "ttft":       ttft_s,
-                    "bench_secs": bench_secs,
-                    "load_secs":  load_time,
-                    "tokens":     ntok,
-                    "ok":         True,
-                })
-            elif status == 200 and ntok == 0:
-                console.print(
-                    f"[yellow]    ✗ Benchmark returned no tokens[/yellow]"
-                )
-                tune_results.append(
-                    {"cfg": cfg_entry, "tps": 0.0, "ok": False,
-                     "reason": "no tokens returned"}
-                )
+            elif resp.status_code == 200:
+                data  = resp.json()
+                usage = data.get("usage", {}) or {}
+                ntok  = int(usage.get("completion_tokens", 0))
+
+                if ntok > 0:
+                    # Pure generation tok/s (warm model — KV cache already built
+                    # during the probe, so this measures real steady-state speed)
+                    gen_tps = ntok / max(bench_secs, 0.1)
+                    # End-to-end first-request feel = probe time (TTFT) + generation
+                    e2e_secs = _probe_secs + bench_secs
+                    e2e_tps  = ntok / max(e2e_secs, 0.1)
+                    console.print(
+                        f"[green]    OK {ntok} tokens — "
+                        f"first token {_probe_secs:.1f}s (from probe), "
+                        f"generation [bold]{gen_tps:.1f} tok/s[/bold], "
+                        f"end-to-end {e2e_tps:.1f} tok/s[/green]"
+                    )
+                    tune_results.append({
+                        "cfg":        cfg_entry,
+                        "tps":        gen_tps,         # for ranking
+                        "gen_tps":    gen_tps,
+                        "e2e_tps":    e2e_tps,
+                        "ttft":       _probe_secs,
+                        "bench_secs": bench_secs,
+                        "load_secs":  load_time,
+                        "tokens":     ntok,
+                        "ok":         True,
+                    })
+                else:
+                    # HTTP 200 but no completion tokens — odd, but DON'T save as
+                    # failed since this is likely a measurement artifact, not a
+                    # real config failure (the probe just confirmed responsiveness).
+                    console.print(
+                        f"[yellow]    ✗ HTTP 200 but completion_tokens=0 "
+                        f"(measurement artifact — not marked as failed)[/yellow]"
+                    )
+                    tune_results.append(
+                        {"cfg": cfg_entry, "tps": 0.0, "ok": False,
+                         "reason": "HTTP 200 but no completion tokens (artifact)"}
+                    )
             else:
                 console.print(
-                    f"[yellow]    ✗ Benchmark HTTP {status}[/yellow]"
+                    f"[yellow]    ✗ Benchmark HTTP {resp.status_code}[/yellow]"
+                )
+                save_failed_config(
+                    model_id, context, k_cache, v_cache, flash_attn,
+                    f"HTTP {resp.status_code}",
                 )
                 tune_results.append(
                     {"cfg": cfg_entry, "tps": 0.0, "ok": False,
-                     "reason": f"HTTP {status}"}
+                     "reason": f"HTTP {resp.status_code}"}
                 )
 
         # Unload whatever is still loaded — clean state after tuning
