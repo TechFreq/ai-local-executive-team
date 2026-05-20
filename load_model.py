@@ -81,9 +81,13 @@ GPU_NAME         = "NVIDIA RTX 3060 12GB"
 
 # ── Warmup buffer ────────────────────────────────────────────────
 # Phi-4 warmup took up to 22s after model appeared in /v1/models
-# Gemma 4 warmup ~5s but also loads vision encoder
-# Keep POST connection alive — it returns 200 when warmup done
-POST_DETECT_WARMUP_SECS = 25
+# Gemma 4 warmup ~5s but also loads vision encoder.
+# Large RAM/hybrid models (>15GB) often appear in /v1/models when they're
+# only 85-90% loaded — KV cache and vision encoder still being mapped from
+# RAM. We hold the POST connection open and let the safety net fire only
+# after this many seconds. Too short = we mark "loaded" too early and the
+# next inference hits a half-warmed model.
+POST_DETECT_WARMUP_SECS = 60
 
 # ── Logging ───────────────────────────────────────────────────────
 LOG_DIR  = Path("logs") / "model_loads"

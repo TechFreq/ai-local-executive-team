@@ -44,6 +44,7 @@ from routers.local_router import (
     FIRST_TOKEN_TIMEOUT,
     signal_abort,
     clear_abort,
+    get_base_url,
 )
 from routers.hybrid_router import detect_intent
 from model_performance_log import (
@@ -1687,6 +1688,81 @@ def run_preflight_and_respond(
 
 
 # ══════════════════════════════════════════════════════════════════
+# TOOL CALL PASSTHROUGH  (for Cline / function-calling clients)
+# ══════════════════════════════════════════════════════════════════
+
+def passthrough_tool_call(
+    messages:        list,
+    tools:           list,
+    tool_choice,
+    requested_model: str,
+    do_stream:       bool,
+):
+    """Proxy tool-call requests straight to LM Studio, bypassing board routing."""
+    import requests as _req
+
+    actual_model = cfg.ceo_model
+    console.print(
+        f"[cyan]  🔧 Tool call passthrough → {actual_model} "
+        f"({len(tools)} tool(s))[/cyan]"
+    )
+
+    payload: dict = {
+        "model":    actual_model,
+        "messages": messages,
+        "tools":    tools,
+        "stream":   do_stream,
+    }
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+
+    lm_url = f"{get_base_url()}/chat/completions"
+
+    if do_stream:
+        def _tool_stream():
+            try:
+                resp = _req.post(lm_url, json=payload, stream=True, timeout=(10, 600))
+                resp.raise_for_status()
+                for raw_line in resp.iter_lines():
+                    if not raw_line:
+                        continue
+                    decoded = raw_line.decode("utf-8")
+                    yield decoded + "\n\n"
+                    if decoded.strip() == "data: [DONE]":
+                        break
+                else:
+                    yield "data: [DONE]\n\n"
+            except Exception as e:
+                console.print(f"[red]  ✗ Tool passthrough stream error: {e}[/red]")
+                yield make_chunk(f"\n\n[Tool passthrough error] {e}")
+                yield make_done(actual_model)
+            _print_waiting()
+
+        return Response(
+            stream_with_context(_tool_stream()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control":     "no-cache",
+                "Connection":        "keep-alive",
+                "X-Accel-Buffering": "no",
+                "Content-Type":      "text/event-stream; charset=utf-8",
+            },
+        )
+
+    # Non-streaming: forward JSON response as-is
+    try:
+        resp = _req.post(lm_url, json=payload, timeout=(10, 600))
+        resp.raise_for_status()
+        return Response(
+            resp.content,
+            status=resp.status_code,
+            mimetype="application/json",
+        )
+    except Exception as e:
+        console.print(f"[red]  ✗ Tool passthrough error: {e}[/red]")
+        return jsonify({"error": str(e)}), 500
+
+
 # OPENAI ENDPOINTS
 # ══════════════════════════════════════════════════════════════════
 
@@ -1698,6 +1774,19 @@ def openai_chat():
     messages        = data.get("messages", [])
     requested_model = data.get("model", "executive-swarm")
     do_stream       = data.get("stream", True)
+    tools           = data.get("tools")
+    tool_choice     = data.get("tool_choice")
+
+    # ── Tool-call passthrough (Cline / function-calling clients) ──
+    if tools:
+        return passthrough_tool_call(
+            messages        = messages,
+            tools           = tools,
+            tool_choice     = tool_choice,
+            requested_model = requested_model,
+            do_stream       = do_stream,
+        )
+    # ── End tool-call passthrough ──────────────────────────────────
 
     user_message, _ = extract_messages(messages)
 
@@ -2716,6 +2805,29 @@ def run_preset_switcher():
         except Exception as e:
             console.print(f"[red]  ✗ FA toggle failed: {e}[/red]\n")
 
+    def _get_ram_pct() -> float:
+        """Returns system RAM usage % using the Windows API (no psutil needed)."""
+        try:
+            import ctypes
+            class _MEMSTATEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength",                ctypes.c_ulong),
+                    ("dwMemoryLoad",            ctypes.c_ulong),
+                    ("ullTotalPhys",            ctypes.c_ulonglong),
+                    ("ullAvailPhys",            ctypes.c_ulonglong),
+                    ("ullTotalPageFile",        ctypes.c_ulonglong),
+                    ("ullAvailPageFile",        ctypes.c_ulonglong),
+                    ("ullTotalVirtual",         ctypes.c_ulonglong),
+                    ("ullAvailVirtual",         ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            _s = _MEMSTATEX()
+            _s.dwLength = ctypes.sizeof(_s)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(_s))
+            return float(_s.dwMemoryLoad)
+        except Exception:
+            return 0.0
+
     def do_tune():
         """
         Auto-tuner — tries a matrix of LM Studio configs for the
@@ -2879,7 +2991,7 @@ def run_preset_switcher():
         # ── Benchmark prompt — same every time for fair comparison ─
         BENCH_PROMPT = "List every prime number between 1 and 50, one per line."
         BENCH_SYSTEM = "You are a helpful assistant. Be concise and direct."
-        BENCH_TOKENS = 100
+        BENCH_TOKENS = 30
 
         est_per   = info.get("est_load_s", 30) + 25   # load + benchmark
         est_total = len(test_matrix) * est_per
@@ -3012,6 +3124,24 @@ def run_preset_switcher():
                 )
                 continue
 
+            # Step 2.5: RAM pressure check — abort before loading if system is near-full.
+            # At 92%+ RAM the OS starts thrashing and results are meaningless.
+            _ram_pct = _get_ram_pct()
+            if _ram_pct >= 92:
+                console.print(
+                    f"[red]    !! RAM at {_ram_pct:.0f}% — skipping load "
+                    f"to avoid system freeze[/red]"
+                )
+                tune_results.append({
+                    "cfg": cfg_entry, "tps": 0.0, "ok": False,
+                    "reason": f"RAM pressure {_ram_pct:.0f}%",
+                })
+                continue
+            elif _ram_pct >= 82:
+                console.print(
+                    f"[yellow]    RAM at {_ram_pct:.0f}% — loading may be slow[/yellow]"
+                )
+
             # Step 3: Load
             attempt = {
                 "attempt":     i + 1,
@@ -3043,60 +3173,184 @@ def run_preset_switcher():
 
             load_time = load_result.get("elapsed", 0)
 
-            # Step 4: Benchmark
-            console.print("[dim]    → Benchmarking...[/dim]")
-            bench_start = time.time()
-            try:
-                resp = _req.post(
-                    f"{_LMS_BASE}/v1/chat/completions",
-                    json={
-                        "model":      lm_id,
-                        "messages":   [
-                            {"role": "system", "content": BENCH_SYSTEM},
-                            {"role": "user",   "content": BENCH_PROMPT},
-                        ],
-                        "max_tokens": BENCH_TOKENS,
-                        "temperature": 0,
-                        "stream":     False,
-                    },
-                    timeout=120,
-                )
-                bench_secs = time.time() - bench_start
+            # Step 4: Benchmark — streamed + threaded so we can show live phases.
+            # First inference at NEW settings is effectively load+benchmark:
+            # fresh KV-cache allocation at the new context size, prompt
+            # re-processing, GPU-layer rebalance. So even for a "loaded" model,
+            # the first request under new config takes much longer than steady state.
+            # GPU-fit models respond fast; hybrid/RAM models need a lot more headroom.
+            _BENCH_TIMEOUT = 45 if gpu_fit else 140
 
-                if resp.status_code == 200:
-                    data   = resp.json()
-                    usage  = data.get("usage", {})
-                    ntok   = usage.get("completion_tokens", BENCH_TOKENS)
-                    tps    = ntok / max(bench_secs, 0.1)
-                    console.print(
-                        f"[green]    ✓ {ntok} tokens  "
-                        f"{bench_secs:.1f}s  "
-                        f"→ [bold]{tps:.1f} tok/s[/bold][/green]"
-                    )
-                    tune_results.append({
-                        "cfg":        cfg_entry,
-                        "tps":        tps,
-                        "bench_secs": bench_secs,
-                        "load_secs":  load_time,
-                        "tokens":     ntok,
-                        "ok":         True,
-                    })
-                else:
-                    console.print(
-                        f"[yellow]    ✗ Benchmark HTTP {resp.status_code}[/yellow]"
-                    )
-                    tune_results.append(
-                        {"cfg": cfg_entry, "tps": 0.0, "ok": False,
-                         "reason": f"HTTP {resp.status_code}"}
-                    )
+            # Visible post-load settle — LM Studio is still finishing KV-cache setup
+            # after the load POST returns 200. Show a countdown so the screen
+            # doesn't go silent.
+            _settle = 2 if gpu_fit else 4
+            console.print(
+                f"[dim]    Finalizing load (KV cache + warmup) — {_settle}s[/dim]"
+            )
+            for _s in range(_settle, 0, -1):
+                console.print(f"[dim]    ... finalizing {_s}s[/dim]")
+                time.sleep(1)
 
-            except Exception as e:
-                bench_secs = time.time() - bench_start
-                console.print(f"[red]    ✗ Benchmark error: {e}[/red]")
+            console.print(
+                f"[dim]    Benchmark request sent — first token may take "
+                f"15-40s on RAM models (limit {_BENCH_TIMEOUT}s)[/dim]"
+            )
+            bench_start    = time.time()
+            _bench_status  = [None]   # HTTP status or None if exception
+            _bench_exc     = [None]
+            _bench_done    = threading.Event()
+            _bench_first   = [None]   # time.time() of first content token
+            _bench_count   = [0]      # tokens received so far
+
+            def _run_bench():
+                try:
+                    with _req.post(
+                        f"{_LMS_BASE}/v1/chat/completions",
+                        json={
+                            "model":       lm_id,
+                            "messages":    [
+                                {"role": "system", "content": BENCH_SYSTEM},
+                                {"role": "user",   "content": BENCH_PROMPT},
+                            ],
+                            "max_tokens":  BENCH_TOKENS,
+                            "temperature": 0,
+                            "stream":      True,
+                        },
+                        stream=True,
+                        timeout=_BENCH_TIMEOUT,
+                    ) as r:
+                        _bench_status[0] = r.status_code
+                        if r.status_code != 200:
+                            return
+                        for raw in r.iter_lines():
+                            if not raw:
+                                continue
+                            line = raw.decode("utf-8", errors="ignore")
+                            if not line.startswith("data: "):
+                                continue
+                            payload = line[6:].strip()
+                            if payload == "[DONE]":
+                                break
+                            try:
+                                obj = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
+                            choices = obj.get("choices") or [{}]
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                if _bench_first[0] is None:
+                                    _bench_first[0] = time.time()
+                                _bench_count[0] += 1
+                except Exception as exc:
+                    _bench_exc[0] = exc
+                finally:
+                    _bench_done.set()
+
+            _bt = threading.Thread(target=_run_bench, daemon=True)
+            _bt.start()
+
+            _next_tick = 3
+            while not _bench_done.wait(timeout=1.0):
+                _elapsed = int(time.time() - bench_start)
+                if _elapsed >= _next_tick:
+                    _pct   = min(99, int(_elapsed / _BENCH_TIMEOUT * 100))
+                    _fill  = "=" * (_pct // 5)
+                    _empty = "." * (20 - _pct // 5)
+
+                    # Phase label changes based on whether first token arrived
+                    if _bench_first[0] is None:
+                        _phase = (
+                            f"warming up — no tokens yet "
+                            f"(KV cache build, prompt processing)"
+                        )
+                    else:
+                        _ntok    = _bench_count[0]
+                        _gen_s   = max(time.time() - _bench_first[0], 0.1)
+                        _ttft    = _bench_first[0] - bench_start
+                        _live_tps = _ntok / _gen_s
+                        _phase = (
+                            f"generating {_ntok}/{BENCH_TOKENS} tokens "
+                            f"@ {_live_tps:.1f} tok/s "
+                            f"(first token took {_ttft:.1f}s)"
+                        )
+                    console.print(
+                        f"[dim]    |{_fill}{_empty}| {_elapsed}s / "
+                        f"{_BENCH_TIMEOUT}s — {_phase}[/dim]"
+                    )
+                    _next_tick = _elapsed + 3
+                if _elapsed >= _BENCH_TIMEOUT:
+                    break
+            _bench_done.wait(timeout=5)
+            bench_secs = time.time() - bench_start
+            status     = _bench_status[0]
+            _ex        = _bench_exc[0]
+            ntok       = _bench_count[0]
+            first_at   = _bench_first[0]
+
+            if _ex is not None:
+                console.print(f"[red]    ✗ Benchmark error: {_ex}[/red]")
                 tune_results.append(
                     {"cfg": cfg_entry, "tps": 0.0, "ok": False,
-                     "reason": str(e)}
+                     "reason": str(_ex)}
                 )
+            elif status is None:
+                console.print(
+                    f"[yellow]    ✗ Benchmark timed out after {bench_secs:.0f}s "
+                    f"({'no tokens yet' if first_at is None else f'{ntok} tokens before timeout'})[/yellow]"
+                )
+                tune_results.append(
+                    {"cfg": cfg_entry, "tps": 0.0, "ok": False,
+                     "reason": f"timeout after {bench_secs:.0f}s "
+                               f"({'warmup' if first_at is None else 'mid-generation'})"}
+                )
+            elif status == 200 and ntok > 0:
+                # End-to-end tok/s (includes first-token latency — real-world feel)
+                tps    = ntok / max(bench_secs, 0.1)
+                ttft_s = (first_at - bench_start) if first_at else 0.0
+                gen_s  = (bench_secs - ttft_s) if first_at else bench_secs
+                gen_tps = ntok / max(gen_s, 0.1)
+                console.print(
+                    f"[green]    OK {ntok} tokens — "
+                    f"first token {ttft_s:.1f}s, "
+                    f"generation {gen_tps:.1f} tok/s, "
+                    f"end-to-end [bold]{tps:.1f} tok/s[/bold][/green]"
+                )
+                tune_results.append({
+                    "cfg":        cfg_entry,
+                    "tps":        tps,
+                    "gen_tps":    gen_tps,
+                    "ttft":       ttft_s,
+                    "bench_secs": bench_secs,
+                    "load_secs":  load_time,
+                    "tokens":     ntok,
+                    "ok":         True,
+                })
+            elif status == 200 and ntok == 0:
+                console.print(
+                    f"[yellow]    ✗ Benchmark returned no tokens[/yellow]"
+                )
+                tune_results.append(
+                    {"cfg": cfg_entry, "tps": 0.0, "ok": False,
+                     "reason": "no tokens returned"}
+                )
+            else:
+                console.print(
+                    f"[yellow]    ✗ Benchmark HTTP {status}[/yellow]"
+                )
+                tune_results.append(
+                    {"cfg": cfg_entry, "tps": 0.0, "ok": False,
+                     "reason": f"HTTP {status}"}
+                )
+
+        # Unload whatever is still loaded — clean state after tuning
+        console.print("[dim]  Unloading after tune...[/dim]")
+        try:
+            _unload(lm_id)
+            time.sleep(1)
+        except Exception as _ue:
+            console.print(f"[yellow]  Unload warning: {_ue}[/yellow]")
 
         # ── Results table ─────────────────────────────────────────
         successful = [r for r in tune_results if r.get("ok") and r["tps"] > 0]
@@ -3113,11 +3367,49 @@ def run_preset_switcher():
 
         if not successful:
             console.print(
-                "[red]  ✗ No configs completed successfully.[/red]"
+                "[red]  ✗ No configs completed successfully.[/red]\n"
             )
-            console.print(
-                "[yellow]  Check LM Studio logs for details.[/yellow]\n"
-            )
+            # Diagnose why — give specific feedback instead of "check logs"
+            _reasons    = [r.get("reason", "") for r in tune_results if not r.get("ok")]
+            _reasons_lc = " ".join(_reasons).lower()
+
+            if "ram pressure" in _reasons_lc:
+                _ram_vals = [r for r in _reasons if "ram pressure" in r.lower()]
+                console.print(
+                    f"[red]  Cause: System RAM pressure ({_ram_vals[0] if _ram_vals else 'high'})[/red]"
+                )
+                console.print(
+                    "[yellow]  Fix: Close other apps to free RAM, or tune a GPU-only model first.[/yellow]"
+                )
+            elif any(x in _reasons_lc for x in ["out of memory", "oom", "failed to allocate"]):
+                console.print("[red]  Cause: Out of memory (VRAM or RAM full)[/red]")
+                console.print("[yellow]  Fix: Try a smaller context size or a GPU-only model.[/yellow]")
+            elif "timeout" in _reasons_lc or "timed out" in _reasons_lc or "connectionerror" in _reasons_lc:
+                _n_to = sum(1 for r in _reasons if "timeout" in r.lower() or "timed out" in r.lower())
+                console.print(
+                    f"[red]  Cause: Benchmark timed out ({_n_to}/{len(_reasons)} configs)[/red]"
+                )
+                console.print(
+                    "[yellow]  This is a RAM-offload model — first token can take 60-120s.[/yellow]"
+                )
+                console.print(
+                    "[yellow]  Tune a GPU-only model first, or run this tune overnight.[/yellow]"
+                )
+            elif any(x in _reasons_lc for x in ["not found", "no such file", "model_not_found"]):
+                console.print("[red]  Cause: Model file not found by LM Studio[/red]")
+                console.print("[yellow]  Fix: Open LM Studio and confirm the model is visible.[/yellow]")
+            elif "load failed" in _reasons_lc or "http 5" in _reasons_lc:
+                console.print("[red]  Cause: LM Studio rejected the load request[/red]")
+                for _r in _reasons[:3]:
+                    console.print(f"[red]    - {_r}[/red]")
+                console.print("[yellow]  Load the model manually in LM Studio to see the full error.[/yellow]")
+            else:
+                for _r in _reasons[:4]:
+                    console.print(f"[red]    - {_r}[/red]")
+                console.print(
+                    "[yellow]  Load the model manually in LM Studio to see the full error.[/yellow]"
+                )
+            console.print()
             return
 
         successful.sort(key=lambda r: r["tps"], reverse=True)
@@ -3301,6 +3593,14 @@ def run_preset_switcher():
         show_ready_banner("Tuned — winner config active")
 
     in_menu = False
+    _unknown_key_hint_shown = False
+
+    _CMD_KEYS = (
+        b" ", b"x", b"X", b"o", b"O", b"s", b"S",
+        b"t", b"T", b"c", b"C", b"f", b"F",
+        b"\x1b", b"\r", b"\n",
+        b"\x03",  # Ctrl+C
+    )
 
     try:
         while True:
@@ -3336,6 +3636,34 @@ def run_preset_switcher():
                         do_set_context()
                     elif key in (b"f", b"F"):
                         do_toggle_fa()
+                    else:
+                        # Any non-command key gets silently eaten by getch().
+                        # Show a one-time hint, then echo every keystroke so the
+                        # user can at least see what they're typing.
+                        if not _unknown_key_hint_shown and key not in _CMD_KEYS:
+                            _unknown_key_hint_shown = True
+                            console.print(
+                                "\n[dim]  (Heads up: this window intercepts single "
+                                "keys for commands — anything you type here won't "
+                                "do anything. Use SPACE/X/O/T/C/F/S only. Send "
+                                "chats from OpenWebUI/Continue/AnythingLLM "
+                                "instead. Typed characters are echoed below so "
+                                "you can see what you typed.)[/dim]\n"
+                            )
+                        # Echo printable chars + handle Enter/Backspace so the
+                        # terminal feels alive even though input is no-op.
+                        try:
+                            if key == b"\r" or key == b"\n":
+                                sys.stdout.write("\n")
+                            elif key == b"\x08":  # backspace
+                                sys.stdout.write("\b \b")
+                            else:
+                                ch = key.decode("utf-8", errors="ignore")
+                                if ch and ch.isprintable():
+                                    sys.stdout.write(ch)
+                            sys.stdout.flush()
+                        except Exception:
+                            pass
                     continue
 
                 if key in (b"\x1b", b"q", b"Q"):
